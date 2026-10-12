@@ -1,0 +1,62 @@
+starting-balance-coins: 100
+hub-world: nexora_hub
+hub:
+  ore-regeneration-delay-ms: 12000
+hub-build:
+  enabled: false
+hub-spawn:
+  world: nexora_hub
+  x: -2.5
+  y: 64.0
+  z: 0.5
+  yaw: 0.0
+  pitch: 0.0
+hub-island-portal:
+  enabled: true
+  x: 1.3
+  y: 56.0
+  z: 28.9
+  radius-x: 4.0
+  radius-y: 3.0
+  radius-z: 4.0
+welcome:
+  - '&b&lNEXORA NETWORK'
+  - '&7Build your island. Create your empire.'
+  - '&7Use &b/island create &7to begin.'
+skills:
+  xp-per-level: 100
+collections:
+  milestones: [1, 10, 50, 100, 250, 500]
+minions:
+  max-per-island: 10
+  base-slots: 2
+  base-action-seconds: 60
+  offline-cap-hours: 24
+  storage-per-tier: 64
+  upgrade-base-cost: 25
+progression:
+  skyblock:
+    max-level: 100
+    xp-base: 100
+    xp-linear: 35
+    xp-quadratic: 3
+  skills:
+    max-level: 50
+    xp-base: 50
+    xp-linear: 20
+    xp-quadratic: 2
+  minion-slot-every-levels: 10
+  feedback-cooldown-ms: 1000
+  rewards:
+    skill-level-xp: 10
+    collection-milestone-xp: 25
+    area-discovery-xp: 50
+scoreboard:
+  profile-name: Main
+  refresh-ticks: 40
+daily:
+  timezone: Europe/Berlin
+  quests:
+    mining: {target: 15, reward-coins: 50, reward-xp: 50}
+    farming: {target: 10, reward-coins: 40, reward-xp: 40}
+    foraging: {target: 8, reward-coins: 35, reward-xp: 35}

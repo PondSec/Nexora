@@ -1,0 +1,57 @@
+services:
+  minecraft:
+    image: ${MC_IMAGE:?Set MC_IMAGE to the pinned itzg image digest in .env}
+    container_name: nexora-minecraft
+    init: true
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    stop_grace_period: 5m
+    mem_limit: 11g
+    mem_reservation: 2g
+    cpus: 4.0
+    environment:
+      EULA: "TRUE"
+      TYPE: PAPER
+      VERSION: "1.21.11"
+      PAPER_BUILD: "132"
+      SKIP_DOWNLOAD_DEFAULTS: "true"
+      LEVEL: nexora_hub
+      UID: "1001"
+      GID: "1001"
+      MEMORY: 8G
+      INIT_MEMORY: 4G
+      USE_AIKAR_FLAGS: "true"
+      STOP_DURATION: "240"
+      ONLINE_MODE: "true"
+      WHITELIST: "MrRichRick,Banane20TV"
+      ENFORCE_WHITELIST: "true"
+      ENABLE_RCON: "false"
+      ENABLE_QUERY: "false"
+      ENABLE_COMMAND_BLOCK: "false"
+      SERVER_NAME: "NEXORA NETWORK"
+      MOTD: "NEXORA SKYBLOCK | Build your island. Create your empire."
+      MAX_PLAYERS: "30"
+      DIFFICULTY: normal
+      MODE: survival
+      PVP: "false"
+      VIEW_DISTANCE: "6"
+      SIMULATION_DISTANCE: "4"
+      SPAWN_PROTECTION: "0"
+      TZ: Europe/Berlin
+    ports:
+      - "192.168.30.50:25565:25565/tcp"
+    volumes:
+      - ./minecraft:/data
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q 'Done (' /data/logs/latest.log"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "5"
+

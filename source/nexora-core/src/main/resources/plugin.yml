@@ -1,0 +1,20 @@
+name: NexoraCore
+version: 0.1.0
+main: network.nexora.core.NexoraCore
+api-version: '1.21'
+depend: [Vault, BentoBox]
+softdepend: [PlaceholderAPI, LuckPerms]
+commands:
+  menu: {description: Open the Nexora navigation menu, usage: /menu}
+  profile: {description: View your Nexora profile, usage: /profile}
+  progress: {description: View your SkyBlock level and progression, usage: /progress}
+  daily: {description: View and claim daily gathering tasks, usage: /daily}
+  coins: {description: View your Coins balance, usage: /coins}
+  skills: {description: View your skill progression, usage: /skills}
+  collections: {description: View your collection progress, usage: /collections}
+  hub: {description: Return to the Nexora Hub, usage: /hub}
+  nexora: {description: Nexora administration diagnostics, usage: /nexora status, permission: nexora.admin}
+  minion: {description: Manage Nexora island minions, usage: /minion give <player> <type> | /minion list}
+permissions:
+  nexora.admin: {default: op}
+  nexora.minion.admin: {default: op}

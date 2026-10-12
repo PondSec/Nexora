@@ -1,0 +1,19 @@
+# Merge this world-specific block into spigot.yml under world-settings.
+# 200% growth modifiers apply only to the Nexora farming world.
+world-settings:
+  nexora_farming:
+    growth:
+      cactus-modifier: 200
+      cane-modifier: 200
+      melon-modifier: 200
+      mushroom-modifier: 200
+      pumpkin-modifier: 200
+      beetroot-modifier: 200
+      carrot-modifier: 200
+      potato-modifier: 200
+      wheat-modifier: 200
+      netherwart-modifier: 200
+      cocoa-modifier: 200
+      bamboo-modifier: 200
+      sweetberry-modifier: 200
+      kelp-modifier: 200

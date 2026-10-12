@@ -1,0 +1,7 @@
+.env
+/minecraft/
+/backups/
+**/target/
+**/build/
+*.log
+
