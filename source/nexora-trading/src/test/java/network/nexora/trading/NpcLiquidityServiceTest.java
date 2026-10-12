@@ -53,6 +53,25 @@ class NpcLiquidityServiceTest {
         assertEquals(0, scalar(db, "SELECT count(*) FROM bazaar_market_maker_transactions"));
     }
 
+    @Test void batchedDisplayQuotesMatchAuthoritativeSinglesAndDoNotCreateExtraLiquidity() throws Exception {
+        var db = db(); var bazaar = new BazaarOrderService(db); var maker = new NpcLiquidityService(db);
+        bazaar.registerProduct("iron_ingot", "minecraft:iron_ingot", 1);
+        bazaar.registerProduct("coal", "minecraft:coal", 1);
+        var iron = new NpcLiquidityService.Policy("bazaar_master", "iron_ingot", 100, 1000, 10, 5000, 20, 6000, 2, 500);
+        var coal = new NpcLiquidityService.Policy("bazaar_master", "coal", 10, 1000, 20, 1000, 30, 2000, 2, 100);
+        maker.configure(iron, 100); maker.configure(coal, 100);
+        maker.sellToNpc(iron, id(1), 2, 95, "batch-sale", 101);
+        var quotes = maker.quotes(java.util.List.of(iron, coal), 102);
+        assertEquals(maker.quote(iron, 102), quotes.get("iron_ingot"));
+        assertEquals(maker.quote(coal, 102), quotes.get("coal"));
+        assertThrows(UnsupportedOperationException.class, () -> quotes.clear());
+        assertTrue(maker.quotes(java.util.List.of(), 102).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> maker.quotes(java.util.List.of(iron, iron), 103));
+        assertEquals(1, scalar(db, "SELECT count(*) FROM bazaar_market_maker_transactions"));
+        assertEquals(32, scalar(db, "SELECT SUM(inventory) FROM bazaar_market_maker_accounts"));
+        assertEquals(0, scalar(db, "SELECT count(*) FROM pragma_foreign_key_check"));
+    }
+
     private static long scalar(MarketplaceDatabase db, String sql) throws Exception {
         try (var c = db.openConnection(); var s = c.createStatement(); var r = s.executeQuery(sql)) { assertTrue(r.next()); return r.getLong(1); }
     }

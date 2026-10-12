@@ -9,6 +9,7 @@ import java.util.*;
  * No Bukkit objects are accessed here. Store opaque Paper serialized inventory bytes. */
 public final class InventoryJournal {
     public enum Domain {
+        LEGACY_CLAIM("SELECT 1 FROM legacy_claim_reconciliations WHERE operation_key=? AND owner_uuid=?"),
         CRAFT(null), STANDARD_PLACE("SELECT 1 FROM standardized_bazaar_transactions WHERE operation_key=? AND owner_uuid=?"), BAZAAR_PLACE("SELECT 1 FROM bazaar_transactions WHERE idempotency_key=? AND profile_uuid=?"),
         NPC_TRADE("SELECT 1 FROM bazaar_market_maker_transactions WHERE idempotency_key=? AND player_uuid=?"),
         AUCTION_LIST("SELECT 1 FROM auction_transactions WHERE idempotency_key=? AND actor_uuid=?"),
@@ -62,7 +63,7 @@ public final class InventoryJournal {
         }
     }
     private Connection connect()throws SQLException {
-        var c=DriverManager.getConnection(url);
+        var c=JdbcMetrics.instrument(DriverManager.getConnection(url),JdbcMetrics.Source.INVENTORY);
         try(var s=c.createStatement()){s.execute("PRAGMA busy_timeout=10000");s.execute("PRAGMA foreign_keys=ON");s.execute("PRAGMA synchronous=FULL");}
         catch(SQLException e){c.close();throw e;}return c;
     }

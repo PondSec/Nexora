@@ -73,6 +73,31 @@ class BazaarOrderServiceTest {
         assertEquals(0, scalar(db, "SELECT count(*) FROM economy_ledger"));
     }
 
+    @Test void partialLegacyReceiptAtomicallyRetainsRemainderAndDrivesJournalRecovery() throws Exception {
+        var db = store(0, 10000); var bazaar = new BazaarOrderService(db);
+        bazaar.registerProduct("coal", "minecraft:coal", 1);
+        bazaar.place(id(1), "coal", OrderSide.SELL, 100, 7, false, "legacy-sell", 2);
+        bazaar.place(id(2), "coal", OrderSide.BUY, 100, 7, false, "legacy-buy", 3);
+        var claim = bazaar.pendingItemClaims(id(2)).getFirst();
+        String url;
+        try (var connection = db.openConnection()) { url = connection.getMetaData().getURL(); }
+        var journal = new network.nexora.core.api.InventoryJournal(Path.of(url.substring("jdbc:sqlite:".length())));
+        journal.prepare(id(2), network.nexora.core.api.InventoryJournal.Domain.LEGACY_CLAIM, claim.claimId(), new byte[]{1}, new byte[]{2});
+        assertFalse(journal.pending(id(2)).committed());
+        assertEquals(4, bazaar.reconcileLegacyDelivery(id(2), claim.claimId(), "coal", 7, 3, 4));
+        assertTrue(journal.pending(id(2)).committed());
+        assertArrayEquals(new byte[]{2}, journal.pending(id(2)).after());
+        assertEquals(4, bazaar.pendingItemClaims(id(2)).getFirst().quantity());
+        assertEquals(4, bazaar.reconcileLegacyDelivery(id(2), claim.claimId(), "coal", 7, 3, 5));
+        assertThrows(java.sql.SQLException.class, () -> bazaar.reconcileLegacyDelivery(id(1), claim.claimId(), "coal", 7, 3, 5));
+        assertThrows(java.sql.SQLException.class, () -> bazaar.reconcileLegacyDelivery(id(2), claim.claimId(), "coal", 7, 4, 5));
+        assertEquals(1, scalar(db, "SELECT count(*) FROM legacy_claim_reconciliations"));
+        journal.finish(id(2), claim.claimId());
+        bazaar.markClaimed(id(2), claim.claimId(), 6);
+        assertTrue(bazaar.pendingItemClaims(id(2)).isEmpty());
+        assertEquals(0, scalar(db, "SELECT count(*) FROM pragma_foreign_key_check"));
+    }
+
     private static long scalar(MarketplaceDatabase db, String sql) throws Exception {
         try (var c = db.openConnection(); var s = c.createStatement(); var rs = s.executeQuery(sql)) {
             assertTrue(rs.next()); return rs.getLong(1);

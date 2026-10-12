@@ -101,6 +101,54 @@ class CollectionRecipeUnlockStoreTest {
         assertTrue(store.isUnlocked(HIGH,"nexora:advanced"));
     }
 
+    @Test void immutableSnapshotsSeparateOwnersAndIncludeFreshSkillAndUnlockState() throws Exception {
+        Path file = database();
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + file); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE skills(uuid TEXT NOT NULL,skill TEXT NOT NULL,xp INTEGER NOT NULL,PRIMARY KEY(uuid,skill))");
+            statement.execute("INSERT INTO skills VALUES('" + HIGH + "','mining',100000)");
+        }
+        var store = new CollectionRecipeUnlockStore(file);
+        var first = store.snapshot(HIGH);
+        assertEquals(1000, first.collectionCount("minecraft:cobblestone"));
+        assertTrue(first.skillLevel("mining") > 1);
+        assertEquals(1, store.snapshot(LOW).skillLevel("mining"));
+        assertEquals(100, store.snapshot(LOW).collectionCount("cobblestone"));
+        assertThrows(UnsupportedOperationException.class, () -> first.collections().put("cobblestone", 999L));
+        assertThrows(UnsupportedOperationException.class, () -> first.skillLevels().put("mining", 99));
+        assertThrows(UnsupportedOperationException.class, () -> first.unlockedRecipes().add("forged"));
+        store.unlockEligibleRecipes(HIGH, registry(), 100);
+        assertTrue(first.unlockedRecipes().isEmpty());
+        assertTrue(store.snapshot(HIGH).unlockedRecipes().contains("enchanted-cobblestone"));
+        assertTrue(store.snapshot(LOW).unlockedRecipes().isEmpty());
+        assertThrows(java.sql.SQLException.class, () -> store.snapshot(new UUID(0, 99)));
+    }
+
+    @Test void largeCatalogBackfillHasBoundedReadsAndStillRequiresSkill() throws Exception {
+        Path file = database();
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + file); var statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE skills(uuid TEXT NOT NULL,skill TEXT NOT NULL,xp INTEGER NOT NULL,PRIMARY KEY(uuid,skill))");
+        }
+        var store = new CollectionRecipeUnlockStore(file);
+        ContentRegistry catalog = new ContentRegistry(); catalog.registerEffectHandler("material");
+        catalog.registerItem(new ItemDefinition("stone", "minecraft:stone", "COMMON", "Stone", "material", true, true));
+        catalog.registerCollection(new CollectionDefinition("cobblestone", "mining", "minecraft:stone", List.of(50L, 1000L), Map.of()));
+        for (int n = 0; n < 200; n++) {
+            String id = "compressed-" + n;
+            catalog.registerItem(new ItemDefinition(id, "minecraft:paper", "UNCOMMON", id, "material", false, true));
+            catalog.registerRecipe(new RecipeDefinition(id, id, 1, Map.of("stone", 160L), "cobblestone", 2, "mining", 2));
+        }
+        long before = network.nexora.core.api.JdbcMetrics.snapshots().get(network.nexora.core.api.JdbcMetrics.Source.PROGRESSION).calls();
+        assertTrue(store.unlockEligibleRecipes(HIGH, catalog, 100).isEmpty());
+        long queries = network.nexora.core.api.JdbcMetrics.snapshots().get(network.nexora.core.api.JdbcMetrics.Source.PROGRESSION).calls() - before;
+        assertTrue(queries < 20, "Locked 200-recipe catalog must use bounded queries, got " + queries);
+        try (var connection = DriverManager.getConnection("jdbc:sqlite:" + file); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO skills VALUES('" + HIGH + "','mining',100000)");
+        }
+        assertEquals(200, store.unlockEligibleRecipes(HIGH, catalog, 200).size());
+        assertTrue(store.unlockEligibleRecipes(HIGH, catalog, 300).isEmpty());
+        assertTrue(store.unlockEligibleRecipes(LOW, catalog, 300).isEmpty());
+    }
+
     private static long scalar(Path file, String sql) throws Exception {
         try (var connection = DriverManager.getConnection("jdbc:sqlite:" + file);
              var statement = connection.createStatement(); var rows = statement.executeQuery(sql)) {

@@ -30,6 +30,33 @@ class MarketplaceDatabaseTest {
 
     private static UUID id(long n) { return new UUID(0, n); }
 
+    @Test void legacyTagLookupRequiresDurableItemDeliveryAcrossAllMarketDomains() throws Exception {
+        var db = new MarketplaceDatabase(database(100000, 100000));
+        var bazaar = new BazaarOrderService(db);
+        bazaar.registerProduct("coal", "minecraft:coal", 1);
+        bazaar.place(id(1), "coal", OrderSide.SELL, 100, 1, false, "legacy-sell", 2);
+        bazaar.place(id(2), "coal", OrderSide.BUY, 100, 1, false, "legacy-buy", 3);
+        String commodity = bazaar.pendingItemClaims(id(2)).getFirst().claimId();
+        var ah = new AuctionHouseService(db);
+        var listing = ah.create(id(1), AuctionHouseService.Mode.BIN, 1000, 10000,
+                "minecraft:diamond_sword", new byte[]{1,2}, "legacy-list", 4);
+        ah.buyBin(id(2), listing.auctionId(), "legacy-ah-buy", 5);
+        String equipment = ah.pendingClaims(id(2)).getFirst().claimId();
+        var standard = new StandardizedBazaarService(db);
+        standard.buy(id(2), "nexora:infinite_rocket", 1000, 1, "legacy-rocket-buy", 6);
+        standard.sell(id(1), "nexora:infinite_rocket", 1000,
+                List.of(new StandardizedBazaarService.StandardItem("legacy-instance", new byte[]{3,4})), "legacy-rocket-sell", 7);
+        String rocket = standard.pendingClaims(id(2)).getFirst().claimId();
+        var ids = java.util.Set.of(commodity, equipment, rocket, "unknown");
+        assertTrue(db.deliveredItemClaims(ids).isEmpty(), "Pending deliveries must keep their recovery tags");
+        bazaar.markClaimed(id(2), commodity, 8);
+        ah.markClaimed(id(2), equipment, 9);
+        standard.markClaimed(id(2), rocket, 10);
+        assertEquals(java.util.Set.of(commodity, equipment, rocket), db.deliveredItemClaims(ids));
+        assertTrue(db.deliveredItemClaims(java.util.Set.of()).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> db.deliveredItemClaims(java.util.Set.of(" ")));
+    }
+
     @Test void migrationIsIdempotentAndWalletChangesAreIdempotent() throws Exception {
         Path file = database(1_000, 500);
         var store = new MarketplaceDatabase(file);

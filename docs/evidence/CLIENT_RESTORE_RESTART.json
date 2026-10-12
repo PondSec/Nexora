@@ -1,0 +1,20 @@
+{
+  "checks": [
+    "crafted minion survives server restart",
+    "traded custom item survives server restart",
+    "other profile materials survive restart"
+  ],
+  "messages": {
+    "NexoraTestA": [
+      "NexoraTestA joined the game",
+      "NexoraTestB joined the game",
+      "Now leaving your island: NexoraTestA's island"
+    ],
+    "NexoraTestB": [
+      "NexoraTestB joined the game",
+      "Now leaving NexoraTestA's island.",
+      "[NEXORA] New area discovered: hub"
+    ]
+  },
+  "passed": true
+}

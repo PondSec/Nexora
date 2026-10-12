@@ -7,6 +7,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
@@ -63,15 +65,17 @@ public final class CollectionRecipeUnlockStore {
         try (Connection connection = connect()) {
             beginImmediate(connection);
             try {
-                if (!profileExists(connection, profileId)) throw new SQLException("Unknown NexoraCore profile " + profileId);
+                ProfileSnapshot snapshot = readSnapshot(connection, profileId);
+                var collections = registry.collections();
                 List<String> unlocked = new ArrayList<>();
                 for (RecipeDefinition recipe : registry.recipes().values().stream()
                         .sorted(java.util.Comparator.comparing(RecipeDefinition::id)).toList()) {
-                    if (recipe.requiredSkill() != null && skillLevel(connection, profileId, recipe.requiredSkill()) < recipe.requiredSkillLevel()) continue;
+                    if (snapshot.unlockedRecipes().contains(recipe.id())) continue;
+                    if (recipe.requiredSkill() != null && snapshot.skillLevel(recipe.requiredSkill()) < recipe.requiredSkillLevel()) continue;
                     boolean eligible = true;
                     for (var requirement : recipe.collectionRequirements().entrySet()) {
-                        CollectionDefinition collection = registry.collections().get(requirement.getKey());
-                        long total = collectionCount(connection, profileId, collection.id());
+                        CollectionDefinition collection = collections.get(requirement.getKey());
+                        long total = snapshot.collectionCount(collection.id());
                         if (collection.tierFor(total) < requirement.getValue()) { eligible = false; break; }
                     }
                     if (!eligible) continue;
@@ -96,6 +100,61 @@ public final class CollectionRecipeUnlockStore {
                 throw exception;
             }
         }
+    }
+
+    /** Immutable, owner-scoped view read in a single SQLite snapshot. No Bukkit objects. */
+    public record ProfileSnapshot(Map<String, Long> collections, Map<String, Integer> skillLevels,
+                                  Set<String> unlockedRecipes) {
+        public ProfileSnapshot {
+            collections = Map.copyOf(collections);
+            skillLevels = Map.copyOf(skillLevels);
+            unlockedRecipes = Set.copyOf(unlockedRecipes);
+        }
+        public long collectionCount(String id) {
+            return collections.getOrDefault(id.startsWith("minecraft:") ? id.substring(10) : id, 0L);
+        }
+        public int skillLevel(String skill) { return skillLevels.getOrDefault(skill, 1); }
+    }
+
+    public ProfileSnapshot snapshot(UUID profileId) throws SQLException {
+        Objects.requireNonNull(profileId, "Profile ID is required");
+        try (Connection connection = connect()) {
+            connection.setAutoCommit(false);
+            try {
+                ProfileSnapshot snapshot = readSnapshot(connection, profileId);
+                connection.commit();
+                return snapshot;
+            } catch (SQLException | RuntimeException exception) {
+                try { connection.rollback(); } catch (SQLException failure) { exception.addSuppressed(failure); }
+                throw exception;
+            }
+        }
+    }
+
+    private ProfileSnapshot readSnapshot(Connection connection, UUID profileId) throws SQLException {
+        if (!profileExists(connection, profileId)) throw new SQLException("Unknown NexoraCore profile " + profileId);
+        Map<String, Long> collections = new HashMap<>();
+        Map<String, Integer> skills = new HashMap<>();
+        Set<String> recipes = new TreeSet<>();
+        try (var query = connection.prepareStatement("SELECT item,amount FROM collections WHERE uuid=?")) {
+            query.setString(1, profileId.toString());
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) collections.put(rows.getString(1), rows.getLong(2));
+            }
+        }
+        if (tableExists(connection, "skills")) {
+            try (var query = connection.prepareStatement("SELECT skill,xp FROM skills WHERE uuid=?")) {
+                query.setString(1, profileId.toString());
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) skills.put(rows.getString(1), network.nexora.core.ProgressionMath.skill(rows.getLong(2), skillCurve).level());
+                }
+            }
+        }
+        try (var query = connection.prepareStatement("SELECT recipe_id FROM nexora_recipe_unlocks WHERE profile_uuid=?")) {
+            query.setString(1, profileId.toString());
+            try (var rows = query.executeQuery()) { while (rows.next()) recipes.add(rows.getString(1)); }
+        }
+        return new ProfileSnapshot(collections, skills, recipes);
     }
 
     public int skillLevel(UUID profileId, String skill) throws SQLException {
@@ -179,7 +238,7 @@ public final class CollectionRecipeUnlockStore {
     }
 
     private Connection connect() throws SQLException {
-        Connection connection = DriverManager.getConnection(jdbcUrl);
+        Connection connection = network.nexora.core.api.JdbcMetrics.instrument(DriverManager.getConnection(jdbcUrl),network.nexora.core.api.JdbcMetrics.Source.PROGRESSION);
         try (Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MILLIS);
             statement.execute("PRAGMA foreign_keys=ON");

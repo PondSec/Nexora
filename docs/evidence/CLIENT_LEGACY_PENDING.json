@@ -1,0 +1,15 @@
+{
+  "phase": "pending",
+  "checks": [
+    "legacy inventory contains exact original tagged items",
+    "pending save-before-ack acknowledged without a second payout",
+    "repeated legacy claim cannot duplicate"
+  ],
+  "messages": [
+    "NexoraLegacy joined the game",
+    "NXLEGACY_SEEDED",
+    "NexoraLegacy joined the game",
+    "Recovered your previously delivered market items."
+  ],
+  "passed": true
+}

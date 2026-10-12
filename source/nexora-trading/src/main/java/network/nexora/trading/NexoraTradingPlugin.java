@@ -216,7 +216,59 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
         finally { if(side==OrderSide.SELL)core.resolveInventoryOperation(player); }
     }
 
+    private record BazaarViewRequest(org.bukkit.entity.Player player, Inventory expected) {}
+    private final Map<UUID, BazaarViewRequest> pendingBazaarViews = new LinkedHashMap<>();
+    private Map<String, NpcLiquidityService.Quote> bazaarQuotes = Map.of();
+    private long bazaarQuotesAtNanos;
+    private boolean bazaarQuoteLoadPending;
+
     private void openBazaar(org.bukkit.entity.Player player) {
+        player.closeInventory();
+        pendingBazaarViews.put(player.getUniqueId(), new BazaarViewRequest(player, player.getOpenInventory().getTopInventory()));
+        if (System.nanoTime() - bazaarQuotesAtNanos < 1_000_000_000L && !bazaarQuotes.isEmpty()) {
+            renderPendingBazaarViews(); return;
+        }
+        if (bazaarQuoteLoadPending) return;
+        bazaarQuoteLoadPending = true;
+        var policies = products.values().stream().filter(product -> !product.standardized)
+                .filter(product -> product.policy.maxInventory() > 0 || product.policy.maxCoinBudgetMinor() > 0)
+                .map(product -> product.policy).toList();
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            Map<String, NpcLiquidityService.Quote> quotes = Map.of();
+            Exception failure = null;
+            try { quotes = npcLiquidity.quotes(policies, System.currentTimeMillis()); }
+            catch (SQLException | RuntimeException exception) { failure = exception; }
+            var loaded = quotes; var error = failure;
+            if (!isEnabled()) return;
+            Bukkit.getScheduler().runTask(this, () -> {
+                bazaarQuoteLoadPending = false;
+                if (error != null) {
+                    getLogger().warning("Bazaar overview could not load: " + error.getMessage());
+                    for (var request : pendingBazaarViews.values()) if (request.player().isOnline())
+                        request.player().sendMessage("§cBazaar offers could not be loaded. Try again shortly.");
+                    pendingBazaarViews.clear(); return;
+                }
+                bazaarQuotes = loaded; bazaarQuotesAtNanos = System.nanoTime();
+                renderPendingBazaarViews();
+            });
+        });
+    }
+
+    private void renderPendingBazaarViews() {
+        var requests = List.copyOf(pendingBazaarViews.values()); pendingBazaarViews.clear();
+        for (var request : requests) {
+            var player = request.player();
+            if (player.isOnline() && Bukkit.getPlayer(player.getUniqueId()) == player
+                    && player.getOpenInventory().getTopInventory() == request.expected()) renderBazaar(player);
+        }
+    }
+
+    @EventHandler public void onOtherBazaarViewOpen(org.bukkit.event.inventory.InventoryOpenEvent event) {
+        // A different menu supersedes any slow overview request. Own renders remove requests first.
+        pendingBazaarViews.remove(event.getPlayer().getUniqueId());
+    }
+
+    private void renderBazaar(org.bukkit.entity.Player player) {
         BazaarBrowseState requested = bazaarBrowseStates.computeIfAbsent(player.getUniqueId(), ignored -> new BazaarBrowseState("ALL", "", 0));
         BazaarHolder holder = new BazaarHolder(); Inventory inv = Bukkit.createInventory(holder, 54, Component.text("NEXORA | BAZAAR")); holder.inventory = inv;
         List<MarketProduct> matches = products.values().stream().filter(product -> requested.category.equals("ALL")
@@ -236,13 +288,13 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                 inv.setItem(slot, button(Material.FIREWORK_ROCKET, "§dInfinite Rocket", List.of("§5MYTHIC · Player market only", "§7No NPC quotes · unique escrow", "§eClick to view Rocket orders"), "bazaar-product:" + product.id));
                 continue;
             }
-            try {
-                NpcLiquidityService.Quote q = npcLiquidity.quote(product.policy, System.currentTimeMillis());
-                List<String> lore = List.of("§7" + product.category, "§6System bid: " + coins(q.bidMinor()) + " §7× " + q.bidQuantity(),
-                        "§aSystem ask: " + coins(q.askMinor()) + " §7× " + q.askQuantity(), "§8System offers use finite stored stock and Coins.", "§eClick to open");
-                ItemStack icon = button(product.material, "§f" + pretty(product.id), lore, "bazaar-product:" + product.id);
-                inv.setItem(slot, icon);
-            } catch (SQLException ex) { getLogger().warning("Bazaar quote failed for " + product.id + ": " + ex.getMessage()); }
+            NpcLiquidityService.Quote q = bazaarQuotes.get(product.id);
+            List<String> lore = q == null
+                    ? List.of("§7" + product.category, "§bPlayer market only", "§7Prices require real player orders.", "§eClick to open")
+                    : List.of("§7" + product.category, "§6System bid: " + coins(q.bidMinor()) + " §7× " + q.bidQuantity(),
+                            "§aSystem ask: " + coins(q.askMinor()) + " §7× " + q.askQuantity(),
+                            "§8Availability is checked again when trading.", "§eClick to open");
+            inv.setItem(slot, button(product.material, "§f" + pretty(product.id), lore, "bazaar-product:" + product.id));
         }
         inv.setItem(45, button(Material.BOOK, "§bMy Bazaar Orders", "bazaar:orders"));
         inv.setItem(46, button(Material.BARREL, "§eCollect bought items", "bazaar:claim"));
@@ -870,8 +922,15 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
             deliverStandardizedBazaarClaims(player);
             for (var claim : bazaar.pendingItemClaims(player.getUniqueId())) {
                 MarketProduct product = products.get(claim.productId()); if (product == null) continue;
-                if(!canFit(player,marketStack(product,Math.toIntExact(Math.min(64,claim.quantity()))))){player.sendMessage("§eFree inventory space, then claim again.");return;}
-                var portion=bazaar.claimPortion(player.getUniqueId(),claim.claimId(),Math.min(64,claim.quantity()),System.currentTimeMillis());
+                long quantity = claim.quantity();
+                if (containsClaim(player, claim.claimId())) {
+                    quantity = recoverLegacyClaim(player, marketStack(product, Math.toIntExact(quantity)), claim.claimId(),
+                            network.nexora.core.api.InventoryJournal.Domain.BAZAAR_CLAIM,
+                            () -> bazaar.markClaimed(player.getUniqueId(), claim.claimId(), System.currentTimeMillis()));
+                    if (quantity == 0) continue;
+                }
+                if(!canFit(player,marketStack(product,Math.toIntExact(Math.min(64,quantity))))){player.sendMessage("§eFree inventory space, then claim again.");return;}
+                var portion=bazaar.claimPortion(player.getUniqueId(),claim.claimId(),Math.min(64,quantity),System.currentTimeMillis());
                 if(portion==null)continue;
                 ItemStack item = marketStack(product,Math.toIntExact(portion.quantity()));
                 deliverClaim(player, item, portion.claimId(), network.nexora.core.api.InventoryJournal.Domain.BAZAAR_CLAIM, () -> bazaar.markClaimed(player.getUniqueId(), portion.claimId(), System.currentTimeMillis()));
@@ -896,6 +955,9 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     }
 
     private void deliverClaim(org.bukkit.entity.Player player, ItemStack item, String claimId, network.nexora.core.api.InventoryJournal.Domain domain, SqlAction acknowledge) throws Exception {
+        if (containsClaim(player, claimId)) { recoverLegacyClaim(player, item, claimId, domain, acknowledge); return; }
+        // Auction snapshots can themselves carry an already-delivered legacy tag.
+        item = withoutClaimTag(item);
         if(!canFit(player,item)){player.sendMessage("§eFree inventory space, then claim again.");return;}
         ItemStack[] after=player.getInventory().getContents();
         for(int i=0;i<after.length;i++)after[i]=after[i]==null?null:after[i].clone();
@@ -914,6 +976,88 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
         String identity=itemCatalog.identify(item);
         String label=identity==null?pretty(item.getType().getKey().getKey()):itemCatalog.entries().get(identity).name();
         player.sendMessage("§aClaimed "+item.getAmount()+" × "+label+".");
+    }
+
+    private ItemStack withoutClaimTag(ItemStack item) {
+        ItemStack clean = item.clone();
+        if (clean.hasItemMeta()) {
+            ItemMeta meta = clean.getItemMeta(); meta.getPersistentDataContainer().remove(claimKey); clean.setItemMeta(meta);
+        }
+        return clean;
+    }
+
+    /** A legacy save-before-ack already contains the whole delivery: acknowledge, never add again. */
+    private long recoverLegacyClaim(org.bukkit.entity.Player player, ItemStack expected, String id,
+                                    network.nexora.core.api.InventoryJournal.Domain domain, SqlAction acknowledge) throws Exception {
+        ItemStack[] after = player.getInventory().getContents();
+        long delivered = 0;
+        ItemStack prototype = withoutClaimTag(expected);
+        for (int slot = 0; slot < after.length; slot++) {
+            ItemStack stack = after[slot];
+            if (stack == null) continue;
+            after[slot] = stack.clone();
+            if (!stack.hasItemMeta() || !id.equals(stack.getItemMeta().getPersistentDataContainer().get(claimKey, PersistentDataType.STRING))) continue;
+            ItemStack clean = withoutClaimTag(stack);
+            if (!clean.isSimilar(prototype)) throw new SQLException("Legacy claim tag does not match its durable item snapshot");
+            delivered = Math.addExact(delivered, stack.getAmount());
+            after[slot] = clean;
+        }
+        boolean commodity = domain == network.nexora.core.api.InventoryJournal.Domain.BAZAAR_CLAIM;
+        if (delivered < 1 || delivered > expected.getAmount() || (!commodity && delivered != expected.getAmount()))
+            throw new SQLException("Legacy quantity does not match its durable delivery for " + id);
+        core.applyInventoryOperation(player, commodity ? network.nexora.core.api.InventoryJournal.Domain.LEGACY_CLAIM : domain, id, after);
+        long remainder = 0;
+        try {
+            if (commodity) {
+                String product = products.values().stream().filter(candidate -> marketStack(candidate, 1).isSimilar(prototype))
+                        .map(candidate -> candidate.id).findFirst().orElseThrow(() -> new SQLException("Unknown legacy commodity"));
+                remainder = bazaar.reconcileLegacyDelivery(player.getUniqueId(), id, product, expected.getAmount(), delivered, System.currentTimeMillis());
+            } else acknowledge.run();
+        } finally { core.resolveInventoryOperation(player); }
+        player.sendMessage("§aRecovered your previously delivered market items.");
+        return remainder;
+    }
+
+    /** Remove only tags backed by durable delivered-item receipts; pending/unknown tags stay intact. */
+    private void normalizeDeliveredClaimTags(org.bukkit.entity.Player player) {
+        Set<String> ids = new HashSet<>();
+        for (ItemStack[] inventory : List.of(player.getInventory().getContents(), player.getEnderChest().getContents())) {
+            for (ItemStack stack : inventory) if (stack != null && stack.hasItemMeta()) {
+                String id = stack.getItemMeta().getPersistentDataContainer().get(claimKey, PersistentDataType.STRING);
+                if (id != null) ids.add(id);
+            }
+        }
+        if (ids.isEmpty()) return;
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            Set<String> delivered;
+            try { delivered = database.deliveredItemClaims(ids); }
+            catch (SQLException | RuntimeException failure) { getLogger().warning("Legacy claim tag lookup failed: " + failure.getMessage()); return; }
+            if (!isEnabled() || delivered.isEmpty()) return;
+            Bukkit.getScheduler().runTask(this, () -> {
+                if (!player.isOnline() || Bukkit.getPlayer(player.getUniqueId()) != player) return;
+                boolean changed = false;
+                for (org.bukkit.inventory.Inventory inventory : List.of(player.getInventory(), player.getEnderChest())) {
+                    for (int slot = 0; slot < inventory.getSize(); slot++) {
+                        ItemStack stack = inventory.getItem(slot);
+                        if (stack == null || !stack.hasItemMeta()) continue;
+                        String id = stack.getItemMeta().getPersistentDataContainer().get(claimKey, PersistentDataType.STRING);
+                        if (id != null && delivered.contains(id)) { inventory.setItem(slot, withoutClaimTag(stack)); changed = true; }
+                    }
+                }
+                if (changed) player.saveData();
+            });
+        });
+    }
+
+    @EventHandler public void onLegacyClaimContainerClose(org.bukkit.event.inventory.InventoryCloseEvent event) {
+        if (event.getPlayer() instanceof org.bukkit.entity.Player player) normalizeDeliveredClaimTags(player);
+    }
+    @EventHandler(priority=org.bukkit.event.EventPriority.MONITOR,ignoreCancelled=true)
+    public void onLegacyClaimPickup(org.bukkit.event.entity.EntityPickupItemEvent event) {
+        if (!(event.getEntity() instanceof org.bukkit.entity.Player player)) return;
+        ItemStack stack = event.getItem().getItemStack();
+        if (!stack.hasItemMeta() || !stack.getItemMeta().getPersistentDataContainer().has(claimKey, PersistentDataType.STRING)) return;
+        Bukkit.getScheduler().runTask(this, () -> { if (player.isOnline()) normalizeDeliveredClaimTags(player); });
     }
 
     private boolean containsClaim(org.bukkit.entity.Player player, String id) {
@@ -977,6 +1121,7 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     @EventHandler public void onPlayerJoin(PlayerJoinEvent event) {
         try { reconcileReservedRockets(event.getPlayer()); }
         catch (Exception ex) { getLogger().severe("Could not reconcile unique market items for " + event.getPlayer().getUniqueId() + ": " + ex.getMessage()); }
+        normalizeDeliveredClaimTags(event.getPlayer());
         Bukkit.getScheduler().runTaskLater(this, this::accrueOnlineInterest, 1L);
     }
 
@@ -1004,6 +1149,7 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     }
 
     @EventHandler public void onPlayerQuit(PlayerQuitEvent event) {
+        pendingBazaarViews.remove(event.getPlayer().getUniqueId());
         bazaarSearchPrompts.remove(event.getPlayer().getUniqueId());
         SignPrompt prompt = signPrompts.remove(event.getPlayer().getUniqueId());
         if (prompt != null) { if (prompt.cleanup != null) prompt.cleanup.cancel(); restoreTemporarySign(prompt); clearTemporarySign(event.getPlayer().getUniqueId()); }

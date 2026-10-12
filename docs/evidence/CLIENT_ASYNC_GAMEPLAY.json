@@ -1,0 +1,38 @@
+{
+  "checks": [
+    "separate inventories survive reconnect",
+    "other profile collection remains locked",
+    "locked recipe has no enabled craft action",
+    "nexora:compress_coal unlocked",
+    "real craft button nexora:compress_coal",
+    "exact 160 ingredient consumption and canonical output",
+    "seller has no duplicate after fill",
+    "claim replay does not duplicate item",
+    "buying materials does not unlock collection",
+    "nexora:minion_coal unlocked",
+    "real craft button nexora:minion_coal",
+    "functional minion recipe consumes eight coal and chassis",
+    "missing materials disable repeat crafting"
+  ],
+  "messages": {
+    "NexoraTestA": [
+      "NexoraTestA joined the game",
+      "NexoraTestB joined the game",
+      "Now leaving your island: NexoraTestA's island",
+      "NXSMOKE_SEEDED",
+      "NexoraTestA joined the game",
+      "NexoraTestB joined the game",
+      "Crafted 1 × Enchanted Coal.",
+      "Order accepted · 0 filled, 1 remaining.",
+      "Crafted 1 × Minion Coal."
+    ],
+    "NexoraTestB": [
+      "NexoraTestB joined the game",
+      "NXSMOKE_SEEDED",
+      "NexoraTestB joined the game",
+      "Order accepted · 1 filled, 0 remaining.",
+      "Claimed 1 × Enchanted Coal."
+    ]
+  },
+  "passed": true
+}

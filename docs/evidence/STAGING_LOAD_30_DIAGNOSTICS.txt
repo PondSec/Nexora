@@ -1,0 +1,10 @@
+[15:56:40] [Server thread/INFO]: NEXORA TPS(1m)=19.85 MSPT=4.57 heap=737.4 MiB
+[15:56:40] [Server thread/INFO]: JDBC CORE execute/transaction calls=996 failures=0 main-thread=331 mean=0.176ms p95-upper=0.131ms max=9.538ms
+[15:56:40] [Server thread/INFO]: JDBC MARKET execute/transaction calls=5709 failures=0 main-thread=2382 mean=0.060ms p95-upper=0.131ms max=7.802ms
+[15:56:40] [Server thread/INFO]: JDBC PROGRESSION execute/transaction calls=335 failures=0 main-thread=11 mean=0.527ms p95-upper=1.049ms max=33.997ms
+[15:56:40] [Server thread/INFO]: JDBC INVENTORY execute/transaction calls=187 failures=0 main-thread=187 mean=0.289ms p95-upper=1.049ms max=7.984ms
+[15:56:52] [Server thread/INFO]: NEXORA TPS(1m)=19.89 MSPT=3.50 heap=606.5 MiB
+[15:56:52] [Server thread/INFO]: JDBC CORE execute/transaction calls=2088 failures=0 main-thread=523 mean=0.091ms p95-upper=0.066ms max=9.538ms
+[15:56:52] [Server thread/INFO]: JDBC MARKET execute/transaction calls=6595 failures=0 main-thread=2382 mean=0.116ms p95-upper=0.131ms max=104.159ms
+[15:56:52] [Server thread/INFO]: JDBC PROGRESSION execute/transaction calls=1145 failures=0 main-thread=11 mean=0.165ms p95-upper=0.066ms max=33.997ms
+[15:56:52] [Server thread/INFO]: JDBC INVENTORY execute/transaction calls=187 failures=0 main-thread=187 mean=0.289ms p95-upper=1.049ms max=7.984ms

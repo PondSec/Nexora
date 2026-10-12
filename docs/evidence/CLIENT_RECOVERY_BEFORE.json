@@ -1,0 +1,208 @@
+{
+  "checks": [
+    "rollback retains original inventory only before business commit",
+    "committed inventory retained exactly once after business commit"
+  ],
+  "messages": [
+    "NexoraCrash has made the advancement [Diamonds!]",
+    "NexoraCrash joined the game"
+  ],
+  "inventory": [
+    {
+      "type": 899,
+      "count": 7,
+      "metadata": 0,
+      "nbt": null,
+      "components": [],
+      "removedComponents": [],
+      "componentMap": {},
+      "stackId": null,
+      "name": "emerald",
+      "displayName": "Emerald",
+      "stackSize": 64,
+      "slot": 36
+    },
+    {
+      "type": 1034,
+      "count": 1,
+      "metadata": 0,
+      "nbt": null,
+      "components": [
+        {
+          "type": "custom_name",
+          "data": {
+            "type": "compound",
+            "value": {
+              "extra": {
+                "type": "list",
+                "value": {
+                  "type": "compound",
+                  "value": [
+                    {
+                      "italic": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "underlined": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "bold": {
+                        "type": "byte",
+                        "value": 1
+                      },
+                      "color": {
+                        "type": "string",
+                        "value": "gold"
+                      },
+                      "obfuscated": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "strikethrough": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "text": {
+                        "type": "string",
+                        "value": "NEXORA Menu"
+                      }
+                    }
+                  ]
+                }
+              },
+              "text": {
+                "type": "string",
+                "value": ""
+              }
+            }
+          }
+        },
+        {
+          "type": "lore",
+          "data": [
+            {
+              "type": "compound",
+              "value": {
+                "extra": {
+                  "type": "list",
+                  "value": {
+                    "type": "compound",
+                    "value": [
+                      {
+                        "italic": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "underlined": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "bold": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "color": {
+                          "type": "string",
+                          "value": "gray"
+                        },
+                        "obfuscated": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "strikethrough": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "text": {
+                          "type": "string",
+                          "value": "Your network guide and travel menu."
+                        }
+                      }
+                    ]
+                  }
+                },
+                "text": {
+                  "type": "string",
+                  "value": ""
+                }
+              }
+            },
+            {
+              "type": "compound",
+              "value": {
+                "extra": {
+                  "type": "list",
+                  "value": {
+                    "type": "compound",
+                    "value": [
+                      {
+                        "italic": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "underlined": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "bold": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "color": {
+                          "type": "string",
+                          "value": "yellow"
+                        },
+                        "obfuscated": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "strikethrough": {
+                          "type": "byte",
+                          "value": 0
+                        },
+                        "text": {
+                          "type": "string",
+                          "value": "Right-click or click in inventory to open."
+                        }
+                      }
+                    ]
+                  }
+                },
+                "text": {
+                  "type": "string",
+                  "value": ""
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "custom_data",
+          "data": {
+            "type": "compound",
+            "value": {
+              "PublicBukkitValues": {
+                "type": "compound",
+                "value": {
+                  "nexoracore:navigation_item": {
+                    "type": "byte",
+                    "value": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "removedComponents": [],
+      "componentMap": {},
+      "stackId": null,
+      "name": "compass",
+      "displayName": "Compass",
+      "stackSize": 64,
+      "slot": 44
+    }
+  ],
+  "passed": true
+}

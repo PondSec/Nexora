@@ -1,0 +1,10 @@
+{
+  "all_match_tested_build": true,
+  "artifacts": {
+    "NexoraCore.jar": "8b8e66bffa01e480655195234774fb0ec6a62324f0344c99f553215b7ba95e58",
+    "NexoraFarm.jar": "c61c076cc49d626d10135642d4388accf310938cb9ec5cf38c7a99aadf1e3c6d",
+    "NexoraPaperSmoke.jar": "cd8d8aaebe0b97b4050af1fa322cc52c8ebded0f94ae05ced920eda21a535f46",
+    "NexoraProgression.jar": "763505007d0e5af0d3b3792ffffd900c2f9bd55f92803b223f16b6baa289514f",
+    "NexoraTrading.jar": "33b86d4cfa7ebcf94bab5326452dceaa5201aede55249597b568885e3e6cdf40"
+  }
+}

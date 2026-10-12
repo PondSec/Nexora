@@ -1,0 +1,16 @@
+{
+  "phase": "partial",
+  "checks": [
+    "legacy inventory contains exact original tagged items",
+    "partial legacy delivery preserves original three and delivers exactly four missing items",
+    "partial legacy reconciliation cannot be replayed for extra items"
+  ],
+  "messages": [
+    "NexoraLegacy joined the game",
+    "NXLEGACY_SEEDED",
+    "NexoraLegacy joined the game",
+    "Recovered your previously delivered market items.",
+    "Claimed 4 × Coal."
+  ],
+  "passed": true
+}

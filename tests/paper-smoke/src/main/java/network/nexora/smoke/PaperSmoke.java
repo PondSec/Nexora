@@ -15,6 +15,58 @@ public final class PaperSmoke extends JavaPlugin {
             getLogger().severe("Smoke harness refuses to run outside isolated loopback staging.");getServer().getPluginManager().disablePlugin(this);return;
         }
         getCommand("nxsmoke").setExecutor((sender,command,label,args)->{
+            if (sender instanceof org.bukkit.command.ConsoleCommandSender && args.length == 2
+                    && args[0].equals("legacy") && Set.of("pending", "delivered", "partial").contains(args[1])) {
+                var player = getServer().getPlayerExact("NexoraLegacy");
+                if (player == null) return false;
+                try {
+                    var core = (network.nexora.core.NexoraCore) getServer().getPluginManager().getPlugin("NexoraCore");
+                    var database = new network.nexora.trading.MarketplaceDatabase(core.getDataFolder().toPath().resolve("nexora.sqlite"));
+                    var market = new network.nexora.trading.BazaarOrderService(database);
+                    // Reset only this hardcoded synthetic profile's earlier console fixtures.
+                    for (var old : market.pendingItemClaims(player.getUniqueId()))
+                        market.markClaimed(player.getUniqueId(), old.claimId(), System.currentTimeMillis());
+                    long now = System.currentTimeMillis();
+                    market.registerProduct("coal", "minecraft:coal", now);
+                    var order = market.place(player.getUniqueId(), "coal", network.nexora.trading.OrderSide.SELL,
+                            1000000000, 7, false, UUID.randomUUID().toString(), now);
+                    if (order.outcome() != network.nexora.trading.BazaarOrderService.Outcome.OPENED)
+                        throw new IllegalStateException("Legacy fixture order did not open");
+                    market.cancel(player.getUniqueId(), order.orderId(), UUID.randomUUID().toString(), now + 1);
+                    var claims = market.pendingItemClaims(player.getUniqueId());
+                    var claim = claims.getLast();
+                    if (args[1].equals("delivered")) market.markClaimed(player.getUniqueId(), claim.claimId(), now + 2);
+                    ItemStack stack = new ItemStack(Material.COAL, args[1].equals("partial") ? 3 : 7);
+                    var meta = stack.getItemMeta();
+                    meta.getPersistentDataContainer().set(NamespacedKey.fromString("nexoratrading:market_claim_id"), PersistentDataType.STRING, claim.claimId());
+                    stack.setItemMeta(meta);player.getInventory().clear();player.getInventory().setItem(0, stack);player.saveData();
+                    player.sendMessage("NXLEGACY_SEEDED");
+                } catch (Exception error) { getLogger().log(java.util.logging.Level.SEVERE, "Legacy fixture failed", error); }
+                return true;
+            }
+            if (sender instanceof org.bukkit.command.ConsoleCommandSender && args.length == 2
+                    && args[0].equals("crash") && Set.of("before", "after").contains(args[1])) {
+                var player = getServer().getPlayerExact("NexoraCrash");
+                if (player == null) return false;
+                try {
+                    player.getInventory().clear();
+                    player.getInventory().setItem(0, new ItemStack(Material.EMERALD, 7));
+                    player.saveData();
+                    ItemStack[] after = player.getInventory().getContents();
+                    after[0] = new ItemStack(Material.DIAMOND, 13);
+                    String operation = UUID.randomUUID().toString();
+                    var core = (network.nexora.core.NexoraCore) getServer().getPluginManager().getPlugin("NexoraCore");
+                    core.applyInventoryOperation(player, network.nexora.core.api.InventoryJournal.Domain.CRAFT, operation, after);
+                    if (args[1].equals("after")) {
+                        new network.nexora.core.api.InventoryJournal(core.getDataFolder().toPath().resolve("nexora.sqlite"))
+                                .commitCraft(player.getUniqueId(), operation);
+                    }
+                    getLogger().warning("NEXORA_CRASH_INJECTION phase=" + args[1] + " operation=" + operation);
+                    // Deliberately bypass all shutdown handlers: isolated staging acceptance only.
+                    Runtime.getRuntime().halt(73);
+                } catch (Exception error) { getLogger().log(java.util.logging.Level.SEVERE, "Crash injection failed", error); }
+                return true;
+            }
             if(!(sender instanceof org.bukkit.command.ConsoleCommandSender)||args.length!=2||!args[0].equals("seed")||!Set.of("NexoraTestA","NexoraTestB").contains(args[1]))return false;
             var player=getServer().getPlayerExact(args[1]);if(player==null)return false;
             var key=new NamespacedKey(this,"seeded");

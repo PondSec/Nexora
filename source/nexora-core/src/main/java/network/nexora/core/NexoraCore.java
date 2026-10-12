@@ -55,6 +55,7 @@ public final class NexoraCore extends JavaPlugin implements Listener {
     private static final String PREFIX="§8[§bNEXORA§8] §7";
 
     @Override public void onEnable() {
+        network.nexora.core.api.JdbcMetrics.setServerThreadId(Thread.currentThread().threadId());
         saveDefaultConfig();
         getConfig().options().copyDefaults(true);saveConfig();
         try { store=new ProgressStore(new java.io.File(getDataFolder(),"nexora.sqlite"),getConfig().getLong("starting-balance-coins",100)*100); }
@@ -345,7 +346,15 @@ public final class NexoraCore extends JavaPlugin implements Listener {
         String owner=brewer.getPersistentDataContainer().get(new org.bukkit.NamespacedKey(this,"brew_owner"),org.bukkit.persistence.PersistentDataType.STRING);
         if(owner!=null)try{awardDirectGather(UUID.fromString(owner),"alchemy",null,15,0);}catch(IllegalArgumentException error){getLogger().warning("Invalid brewer owner");}
     }
-    private boolean command(CommandSender sender,Command cmd,String label,String[] args){if(!(sender instanceof Player p)){sender.sendMessage("Player only.");return true;}try{UUID id=p.getUniqueId();switch(cmd.getName().toLowerCase(Locale.ROOT)){
+    private boolean command(CommandSender sender,Command cmd,String label,String[] args){
+        if(cmd.getName().equalsIgnoreCase("nexora")&&args.length==1&&args[0].equalsIgnoreCase("diagnostics")) {
+            if(!sender.hasPermission("nexora.admin")){sender.sendMessage("No permission.");return true;}
+            Runtime runtime=Runtime.getRuntime();double heap=(runtime.totalMemory()-runtime.freeMemory())/1048576D;
+            sender.sendMessage(String.format(Locale.US,"NEXORA TPS(1m)=%.2f MSPT=%.2f heap=%.1f MiB",getServer().getTPS()[0],getServer().getAverageTickTime(),heap));
+            network.nexora.core.api.JdbcMetrics.snapshots().entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry->{var m=entry.getValue();sender.sendMessage(String.format(Locale.US,"JDBC %s execute/transaction calls=%d failures=%d main-thread=%d mean=%.3fms p95-upper=%.3fms max=%.3fms",entry.getKey(),m.calls(),m.failures(),m.serverThreadCalls(),m.meanMillis(),m.p95UpperMillis(),m.maxMillis()));});
+            return true;
+        }
+        if(!(sender instanceof Player p)){sender.sendMessage("Player only.");return true;}try{UUID id=p.getUniqueId();switch(cmd.getName().toLowerCase(Locale.ROOT)){
         case "coins"->p.sendMessage(PREFIX+"Balance: §6"+format(store.balance(id))+" Coins");
         case "profile"->openProfile(p);
         case "menu"->navigation.openMain(p);

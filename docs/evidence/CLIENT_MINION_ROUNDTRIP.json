@@ -1,0 +1,274 @@
+{
+  "checks": [
+    "crafted minion available after server restart",
+    "real BentoBox island created",
+    "solid island placement floor",
+    "offhand placement consumes exactly one minion token",
+    "existing minion upgrade action visible",
+    "portable token retains exact tier II metadata",
+    "owner can pick up empty upgraded minion"
+  ],
+  "messages": [
+    "NexoraTestA joined the game",
+    "Now leaving your island: NexoraTestA's island",
+    "Teleporting you to your island.",
+    "Now entering your island: NexoraTestA's island",
+    "[NEXORA] Coal Minion placed. Right-click it to manage its storage and tier.",
+    "[NEXORA] Minion picked up."
+  ],
+  "portableToken": {
+    "type": 1254,
+    "count": 1,
+    "metadata": 0,
+    "nbt": null,
+    "components": [
+      {
+        "type": "custom_data",
+        "data": {
+          "type": "compound",
+          "value": {
+            "PublicBukkitValues": {
+              "type": "compound",
+              "value": {
+                "nexoraprogression:item_id": {
+                  "type": "string",
+                  "value": "nexora:minion_coal"
+                },
+                "nexoracore:minion_tier": {
+                  "type": "int",
+                  "value": 2
+                },
+                "nexoraprogression:item_version": {
+                  "type": "int",
+                  "value": 1
+                },
+                "nexoracore:minion_item_type": {
+                  "type": "string",
+                  "value": "coal"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "custom_name",
+        "data": {
+          "type": "compound",
+          "value": {
+            "extra": {
+              "type": "list",
+              "value": {
+                "type": "compound",
+                "value": [
+                  {
+                    "italic": {
+                      "type": "byte",
+                      "value": 0
+                    },
+                    "underlined": {
+                      "type": "byte",
+                      "value": 0
+                    },
+                    "bold": {
+                      "type": "byte",
+                      "value": 0
+                    },
+                    "color": {
+                      "type": "string",
+                      "value": "aqua"
+                    },
+                    "obfuscated": {
+                      "type": "byte",
+                      "value": 0
+                    },
+                    "strikethrough": {
+                      "type": "byte",
+                      "value": 0
+                    },
+                    "text": {
+                      "type": "string",
+                      "value": "Coal Minion "
+                    }
+                  },
+                  {
+                    "italic": {
+                      "type": "byte",
+                      "value": 0
+                    },
+                    "color": {
+                      "type": "string",
+                      "value": "dark_gray"
+                    },
+                    "text": {
+                      "type": "string",
+                      "value": "[T2]"
+                    }
+                  }
+                ]
+              }
+            },
+            "text": {
+              "type": "string",
+              "value": ""
+            }
+          }
+        }
+      },
+      {
+        "type": "lore",
+        "data": [
+          {
+            "type": "compound",
+            "value": {
+              "extra": {
+                "type": "list",
+                "value": {
+                  "type": "compound",
+                  "value": [
+                    {
+                      "italic": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "underlined": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "bold": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "color": {
+                        "type": "string",
+                        "value": "gray"
+                      },
+                      "obfuscated": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "strikethrough": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "text": {
+                        "type": "string",
+                        "value": "Place on an island where you can build."
+                      }
+                    }
+                  ]
+                }
+              },
+              "text": {
+                "type": "string",
+                "value": ""
+              }
+            }
+          },
+          {
+            "type": "compound",
+            "value": {
+              "extra": {
+                "type": "list",
+                "value": {
+                  "type": "compound",
+                  "value": [
+                    {
+                      "italic": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "underlined": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "bold": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "color": {
+                        "type": "string",
+                        "value": "gray"
+                      },
+                      "obfuscated": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "strikethrough": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "text": {
+                        "type": "string",
+                        "value": "Right-click to manage generated resources."
+                      }
+                    }
+                  ]
+                }
+              },
+              "text": {
+                "type": "string",
+                "value": ""
+              }
+            }
+          },
+          {
+            "type": "compound",
+            "value": {
+              "extra": {
+                "type": "list",
+                "value": {
+                  "type": "compound",
+                  "value": [
+                    {
+                      "italic": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "underlined": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "bold": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "color": {
+                        "type": "string",
+                        "value": "dark_gray"
+                      },
+                      "obfuscated": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "strikethrough": {
+                        "type": "byte",
+                        "value": 0
+                      },
+                      "text": {
+                        "type": "string",
+                        "value": "NEXORA MINION:coal"
+                      }
+                    }
+                  ]
+                }
+              },
+              "text": {
+                "type": "string",
+                "value": ""
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "removedComponents": [],
+    "componentMap": {},
+    "stackId": null,
+    "name": "armor_stand",
+    "displayName": "Armor Stand",
+    "stackSize": 16,
+    "slot": 37
+  },
+  "passed": true
+}

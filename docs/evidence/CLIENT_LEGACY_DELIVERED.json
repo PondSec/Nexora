@@ -1,0 +1,13 @@
+{
+  "phase": "delivered",
+  "checks": [
+    "legacy inventory contains exact original tagged items",
+    "already delivered legacy item normalized without changing quantity"
+  ],
+  "messages": [
+    "NexoraLegacy joined the game",
+    "NXLEGACY_SEEDED",
+    "NexoraLegacy joined the game"
+  ],
+  "passed": true
+}

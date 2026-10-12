@@ -1,0 +1,5 @@
+[14:53:52] [Server thread/INFO]: NEXORA TPS(1m)=19.97 MSPT=0.22 heap=550.8 MiB
+[14:53:52] [Server thread/INFO]: JDBC CORE execute/transaction calls=206 failures=0 main-thread=126 mean=0.091ms p95-upper=0.131ms max=3.274ms
+[14:53:52] [Server thread/INFO]: JDBC MARKET execute/transaction calls=2522 failures=0 main-thread=2494 mean=0.125ms p95-upper=1.049ms max=6.822ms
+[14:53:52] [Server thread/INFO]: JDBC PROGRESSION execute/transaction calls=218 failures=0 main-thread=29 mean=0.056ms p95-upper=0.066ms max=3.230ms
+[14:53:52] [Server thread/INFO]: JDBC INVENTORY execute/transaction calls=78 failures=0 main-thread=78 mean=1.046ms p95-upper=2.097ms max=52.638ms

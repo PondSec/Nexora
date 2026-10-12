@@ -47,6 +47,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
     private NamespacedKey itemInstanceKey;
     private NamespacedKey actionKey;
     private final Map<UUID, org.bukkit.scheduler.BukkitTask> unlockTasks = new ConcurrentHashMap<>();
+    private final Map<UUID, PendingView> pendingViews = new java.util.HashMap<>();
     private final Map<UUID, Long> rocketCooldownUntil = new ConcurrentHashMap<>();
     private final Set<UUID> approvedMiningWarps = ConcurrentHashMap.newKeySet();
 
@@ -305,7 +306,83 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         return feet;
     }
 
-    private void openCollectionBook(org.bukkit.entity.Player player, int requestedPage) {
+    private static final class PendingView {
+        Inventory expectedInventory;
+        java.util.function.Consumer<CollectionRecipeUnlockStore.ProfileSnapshot> render;
+    }
+
+    /** At most one read in flight per player; rapid navigation replaces its pending render. */
+    private void loadView(org.bukkit.entity.Player player,
+                          java.util.function.Consumer<CollectionRecipeUnlockStore.ProfileSnapshot> render) {
+        // Close the previous container before capturing the guard. Paper may process a
+        // client close packet after its asynchronously dispatched navigation command.
+        player.closeInventory();
+        UUID id = player.getUniqueId();
+        PendingView pending = pendingViews.get(id);
+        if (pending != null) {
+            pending.expectedInventory = player.getOpenInventory().getTopInventory();
+            pending.render = render;
+            return;
+        }
+        PendingView request = new PendingView();
+        request.expectedInventory = player.getOpenInventory().getTopInventory();
+        request.render = render;
+        pendingViews.put(id, request);
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            CollectionRecipeUnlockStore.ProfileSnapshot snapshot = null;
+            Exception failure = null;
+            try { snapshot = unlocks.snapshot(id); }
+            catch (SQLException | RuntimeException exception) { failure = exception; }
+            var result = snapshot;
+            var error = failure;
+            if (!isEnabled()) return;
+            Bukkit.getScheduler().runTask(this, () -> {
+                boolean ownsRequest = pendingViews.remove(id, request);
+                if (!ownsRequest || !player.isOnline() || Bukkit.getPlayer(id) != player
+                        || player.getOpenInventory().getTopInventory() != request.expectedInventory) {
+                    if (Boolean.getBoolean("nexora.staging")) getLogger().info("VIEW_SKIPPED " + player.getName()
+                            + " owns=" + ownsRequest + " online=" + player.isOnline() + " expected="
+                            + (request.expectedInventory == null ? "null" : request.expectedInventory.getType() + ":" + System.identityHashCode(request.expectedInventory))
+                            + " actual=" + player.getOpenInventory().getTopInventory().getType() + ":" + System.identityHashCode(player.getOpenInventory().getTopInventory()));
+                    return;
+                }
+                if (error != null) {
+                    getLogger().warning("Progression menu could not load: " + error.getMessage());
+                    player.sendMessage("§cYour progression could not be loaded. Try again shortly.");
+                    return;
+                }
+                request.render.accept(result);
+            });
+        });
+    }
+
+    @EventHandler public void onProgressionViewClose(org.bukkit.event.inventory.InventoryCloseEvent event) {
+        // A late close packet can address the player's default window after its old
+        // container was closed. It must not cancel the newly requested menu.
+        if (event.getInventory().getType() == org.bukkit.event.inventory.InventoryType.CRAFTING) return;
+        PendingView request = pendingViews.get(event.getPlayer().getUniqueId());
+        if (request != null && request.expectedInventory == event.getInventory()) request.expectedInventory = null;
+    }
+
+    @EventHandler public void onOtherViewOpen(org.bukkit.event.inventory.InventoryOpenEvent event) {
+        PendingView request = pendingViews.get(event.getPlayer().getUniqueId());
+        if (request != null && event.getInventory() != request.expectedInventory) request.expectedInventory = null;
+    }
+
+    private void openCollectionBook(org.bukkit.entity.Player player, int page) {
+        loadView(player, snapshot -> renderCollectionBook(player, page, snapshot));
+    }
+    private void openCollectionRewards(org.bukkit.entity.Player player, String id, int page) {
+        loadView(player, snapshot -> renderCollectionRewards(player, id, page, snapshot));
+    }
+    private void openRecipeBook(org.bukkit.entity.Player player, int page) {
+        loadView(player, snapshot -> renderRecipeBook(player, page, snapshot));
+    }
+    private void openRecipe(org.bukkit.entity.Player player, String id, int page) throws SQLException {
+        loadView(player, snapshot -> renderRecipe(player, id, page, snapshot));
+    }
+
+    private void renderCollectionBook(org.bukkit.entity.Player player, int requestedPage, CollectionRecipeUnlockStore.ProfileSnapshot snapshot) {
         List<CollectionDefinition> collections = content.collections().values().stream()
                 .sorted(Comparator.comparing(CollectionDefinition::category).thenComparing(CollectionDefinition::id)).toList();
         int pages = Math.max(1, (collections.size() + 44) / 45);
@@ -316,15 +393,14 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         int start = page * 45;
         for (int slot = 0; slot < 45 && start + slot < collections.size(); slot++) {
             CollectionDefinition collection = collections.get(start + slot);
-            try {
-                long count = unlocks.collectionCount(player.getUniqueId(), collection.id());
+                long count = snapshot.collectionCount(collection.id());
                 int tier = collection.tierFor(count);
                 List<Component> lore = new ArrayList<>();
                 lore.add(Component.text("§7Category: §f" + collection.category()));
                 lore.add(Component.text("§7Collection tier: §e" + tier + "/" + collection.tierThresholds().size()));
                 lore.add(Component.text("§7Collected: §f" + count));
                 List<CollectionReward> upcoming = collection.rewardsThrough(collection.tierThresholds().size()).stream()
-                        .filter(reward -> !isRewardUnlocked(player, reward)).limit(2).toList();
+                        .filter(reward -> !snapshot.unlockedRecipes().contains(reward.targetId())).limit(2).toList();
                 if (upcoming.isEmpty()) lore.add(Component.text("§aAll listed recipe rewards unlocked"));
                 else for (CollectionReward reward : upcoming) {
                     RecipeDefinition recipe = content.recipes().get(reward.targetId());
@@ -337,9 +413,6 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
                 meta.getPersistentDataContainer().set(actionKey, PersistentDataType.STRING, "collection:" + collection.id());
                 icon.setItemMeta(meta);
                 inventory.setItem(slot, icon);
-            } catch (SQLException exception) {
-                getLogger().warning("Could not read collection summary: " + exception.getMessage());
-            }
         }
         inventory.setItem(45, action(Material.ARROW, "§ePrevious collections", page > 0 ? "collections-page:" + (page - 1) : "noop"));
         inventory.setItem(49, action(Material.BOOK, "§bCollection rewards · " + collections.size() + " collections", "noop"));
@@ -347,11 +420,10 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         player.openInventory(inventory);
     }
 
-    private void openCollectionRewards(org.bukkit.entity.Player player, String collectionId, int page) {
+    private void renderCollectionRewards(org.bukkit.entity.Player player, String collectionId, int page, CollectionRecipeUnlockStore.ProfileSnapshot snapshot) {
         CollectionDefinition collection = content.collections().get(collectionId);
         if (collection == null) return;
-        try {
-            long count = unlocks.collectionCount(player.getUniqueId(), collectionId);
+            long count = snapshot.collectionCount(collectionId);
             int tier = collection.tierFor(count);
             CollectionHolder holder = new CollectionHolder(page, collectionId);
             Inventory inventory = Bukkit.createInventory(holder, 54, Component.text("COLLECTION REWARDS | " + titleCase(collectionId)));
@@ -387,7 +459,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
                 RecipeDefinition recipe = content.recipes().get(reward.targetId());
                 if (recipe == null) continue;
                 ItemDefinition output = content.items().get(recipe.outputItemId());
-                boolean unlocked = unlocks.isUnlocked(player.getUniqueId(), recipe.id());
+                boolean unlocked = snapshot.unlockedRecipes().contains(recipe.id());
                 ItemStack icon = itemStack(output, 1);
                 ItemMeta meta = icon.getItemMeta();
                 int recipeTier = recipe.collectionRequirements().get(collectionId);
@@ -396,7 +468,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
                 lore.add(Component.text("§7Reward at " + titleCase(collectionId) + " tier " + recipeTier));
                 for (var requirement : recipe.collectionRequirements().entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
                     CollectionDefinition requiredCollection = content.collections().get(requirement.getKey());
-                    long requiredCount = unlocks.collectionCount(player.getUniqueId(), requirement.getKey());
+                    long requiredCount = snapshot.collectionCount(requirement.getKey());
                     int currentTier = requiredCollection.tierFor(requiredCount);
                     lore.add(Component.text((currentTier >= requirement.getValue() ? "§a" : "§c") + titleCase(requirement.getKey())
                             + " tier " + currentTier + "/" + requirement.getValue()));
@@ -413,15 +485,6 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
             inventory.setItem(49, action(Material.BOOK, "§bCollection recipe rewards", "noop"));
             if (rewardEnd < rewards.size()) inventory.setItem(50, action(Material.ARROW, "§eMore rewards", "collection:" + collectionId + ":" + (page + 1)));
             player.openInventory(inventory);
-        } catch (SQLException exception) {
-            getLogger().warning("Collection rewards could not load: " + exception.getMessage());
-            player.sendMessage("§cCollection rewards could not be loaded. Try again shortly.");
-        }
-    }
-
-    private boolean isRewardUnlocked(org.bukkit.entity.Player player, CollectionReward reward) {
-        try { return unlocks.isUnlocked(player.getUniqueId(), reward.targetId()); }
-        catch (SQLException exception) { return false; }
     }
 
     private String titleCase(String value) {
@@ -470,6 +533,8 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
     }
 
     @EventHandler public void onQuit(PlayerQuitEvent event) {
+        pendingViews.remove(event.getPlayer().getUniqueId());
+        rocketCooldownUntil.remove(event.getPlayer().getUniqueId());
         org.bukkit.scheduler.BukkitTask pending = unlockTasks.remove(event.getPlayer().getUniqueId());
         if (pending != null) pending.cancel();
     }
@@ -508,9 +573,8 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
 
     private void openRecipeBook(org.bukkit.entity.Player player) { openRecipeBook(player, 0); }
 
-    private void openRecipeBook(org.bukkit.entity.Player player, int requestedPage) {
-        try {
-            Set<String> unlocked = unlocks.unlockedRecipes(player.getUniqueId());
+    private void renderRecipeBook(org.bukkit.entity.Player player, int requestedPage, CollectionRecipeUnlockStore.ProfileSnapshot snapshot) {
+            Set<String> unlocked = snapshot.unlockedRecipes();
             List<RecipeDefinition> recipes = content.recipes().values().stream()
                     .sorted(Comparator.comparingInt((RecipeDefinition recipe) -> recipe.id().equals("nexora:infinite_rocket") ? 0
                                     : recipe.id().matches("nexora:(condensed_pyrocell|eternal_fuel_cell|astral_navigation_core|aerodynamic_stabilizer|reinforced_rocket_chassis)") ? 1 : 2)
@@ -533,7 +597,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
                 lore.add(Component.text(known ? "§aRecipe Status: UNLOCKED" : "§cRecipe Status: LOCKED"));
                 for (var requirement : recipe.collectionRequirements().entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
                     CollectionDefinition collection = content.collections().get(requirement.getKey());
-                    long count = unlocks.collectionCount(player.getUniqueId(), requirement.getKey());
+                    long count = snapshot.collectionCount(requirement.getKey());
                     boolean met = collection.tierFor(count) >= requirement.getValue();
                     lore.add(Component.text((met ? "§a" : "§c") + requirement.getKey() + " " + (met ? "✓" : "tier " + requirement.getValue())));
                 }
@@ -553,25 +617,21 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
             inventory.setItem(49, action(Material.BOOK, "§b" + (page + 1) + "/" + pages + " · " + unlocked.size() + "/" + recipes.size() + " unlocked", "noop"));
             inventory.setItem(53, action(Material.ARROW, "§eMore recipes", page + 1 < pages ? "page:" + (page + 1) : "noop"));
             player.openInventory(inventory);
-        } catch (SQLException exception) {
-            getLogger().warning("Recipe Book could not load: " + exception.getMessage());
-            player.sendMessage("§cYour Recipe Book could not be loaded. Try again shortly.");
-        }
     }
 
     private void openRecipe(org.bukkit.entity.Player player, String recipeId) throws SQLException {
         openRecipe(player, recipeId, 0);
     }
 
-    private void openRecipe(org.bukkit.entity.Player player, String recipeId, int backPage) throws SQLException {
+    private void renderRecipe(org.bukkit.entity.Player player, String recipeId, int backPage, CollectionRecipeUnlockStore.ProfileSnapshot snapshot) {
         RecipeDefinition recipe = content.recipes().get(recipeId);
         if (recipe == null) {
             player.sendMessage("§cThat recipe is unavailable.");
             openRecipeBook(player);
             return;
         }
-        boolean known = unlocks.isUnlocked(player.getUniqueId(), recipeId);
-        CraftingRules.Result preview = craftingCheck(player, recipe, 1, known);
+        boolean known = snapshot.unlockedRecipes().contains(recipeId);
+        CraftingRules.Result preview = craftingCheck(player, recipe, 1, known, snapshot);
         RecipeHolder holder = new RecipeHolder(backPage);
         Inventory inventory = Bukkit.createInventory(holder, 54, Component.text("RECIPE | " + displayName(content.items().get(recipe.outputItemId()))));
         holder.inventory = inventory;
@@ -598,7 +658,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         if(recipe.requiredSkill()!=null)outputLore.add(Component.text("§7Requires "+recipe.requiredSkill()+" level "+recipe.requiredSkillLevel()));
         for (var requirement : recipe.collectionRequirements().entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
             CollectionDefinition collection = content.collections().get(requirement.getKey());
-            long count = unlocks.collectionCount(player.getUniqueId(), requirement.getKey());
+            long count = snapshot.collectionCount(requirement.getKey());
             int tier = collection.tierFor(count);
             outputLore.add(Component.text((tier >= requirement.getValue() ? "§a" : "§c") + collection.id()
                     + " tier " + tier + "/" + requirement.getValue() + " · " + count + "/" + collection.tierThresholds().get(requirement.getValue()-1)));
@@ -628,8 +688,8 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         }
         if (known) {
             craftButton(inventory,46,recipeId,1,backPage,preview);
-            craftButton(inventory,49,recipeId,4,backPage,craftingCheck(player,recipe,4,true));
-            craftButton(inventory,52,recipeId,16,backPage,craftingCheck(player,recipe,16,true));
+            craftButton(inventory,49,recipeId,4,backPage,craftingCheck(player,recipe,4,true,snapshot));
+            craftButton(inventory,52,recipeId,16,backPage,craftingCheck(player,recipe,16,true,snapshot));
         } else inventory.setItem(49, action(Material.BARRIER, "§cLocked · see missing collections above", "noop"));
         inventory.setItem(53, action(Material.ARROW, "§eBack to Recipe Book", "book:" + backPage));
         player.openInventory(inventory);
@@ -642,11 +702,12 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
     }
     private void craft(org.bukkit.entity.Player player, String recipeId, int times, int backPage) throws SQLException {
         RecipeDefinition recipe = content.recipes().get(recipeId);
-        if (recipe == null || times < 1 || times > 16 || !unlocks.isUnlocked(player.getUniqueId(), recipeId)) {
+        var snapshot = unlocks.snapshot(player.getUniqueId());
+        if (recipe == null || times < 1 || times > 16 || !snapshot.unlockedRecipes().contains(recipeId)) {
             player.sendMessage("§cThis recipe is unavailable on your profile.");
             return;
         }
-        CraftingRules.Result validation = craftingCheck(player, recipe, times, true);
+        CraftingRules.Result validation = craftingCheck(player, recipe, times, true, snapshot);
         if (validation != CraftingRules.Result.READY) { player.sendMessage("§cCannot craft: " + validation.name().replace('_', ' ')); return; }
         ItemDefinition outputDefinition = content.items().get(recipe.outputItemId());
         long outputAmount = Math.multiplyExact(recipe.outputAmount(), times);
@@ -674,14 +735,14 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         openRecipe(player, recipeId, backPage);
     }
 
-    private CraftingRules.Result craftingCheck(org.bukkit.entity.Player player, RecipeDefinition recipe, int times, boolean unlocked) throws SQLException {
+    private CraftingRules.Result craftingCheck(org.bukkit.entity.Player player, RecipeDefinition recipe, int times, boolean unlocked, CollectionRecipeUnlockStore.ProfileSnapshot snapshot) {
         Map<String,Long> available = new java.util.HashMap<>();
         for(ItemStack item:player.getInventory().getStorageContents()) {
             String id=itemCatalog.identify(item); if(id!=null)available.merge(id,(long)item.getAmount(),Long::sum);
         }
         Map<String,Integer> skills = new java.util.HashMap<>(), tiers = new java.util.HashMap<>();
-        if(recipe.requiredSkill()!=null)skills.put(recipe.requiredSkill(),unlocks.skillLevel(player.getUniqueId(),recipe.requiredSkill()));
-        for(String collection:recipe.collectionRequirements().keySet())tiers.put(collection,content.collections().get(collection).tierFor(unlocks.collectionCount(player.getUniqueId(),collection)));
+        if(recipe.requiredSkill()!=null)skills.put(recipe.requiredSkill(),snapshot.skillLevel(recipe.requiredSkill()));
+        for(String collection:recipe.collectionRequirements().keySet())tiers.put(collection,content.collections().get(collection).tierFor(snapshot.collectionCount(collection)));
         CraftingRules.Result result=CraftingRules.check(recipe,times,unlocked,available,skills,tiers);
         if(result!=CraftingRules.Result.READY)return result;
         ItemStack[] simulated=cloneItems(player.getInventory().getStorageContents());

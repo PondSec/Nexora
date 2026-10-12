@@ -19,7 +19,7 @@ final class ProgressStore implements AutoCloseable {
         file.getParentFile().mkdirs();
         org.sqlite.SQLiteConfig sqlite = new org.sqlite.SQLiteConfig();
         sqlite.setTransactionMode(org.sqlite.SQLiteConfig.TransactionMode.IMMEDIATE);
-        connection = DriverManager.getConnection("jdbc:sqlite:" + file.getAbsolutePath(), sqlite.toProperties());
+        connection = network.nexora.core.api.JdbcMetrics.instrument(DriverManager.getConnection("jdbc:sqlite:" + file.getAbsolutePath(), sqlite.toProperties()),network.nexora.core.api.JdbcMetrics.Source.CORE);
         try (Statement s = connection.createStatement()) {
             s.execute("PRAGMA journal_mode=WAL");
             s.execute("PRAGMA foreign_keys=ON");

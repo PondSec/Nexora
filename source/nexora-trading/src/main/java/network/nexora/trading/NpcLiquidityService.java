@@ -43,23 +43,49 @@ public final class NpcLiquidityService {
     }
 
     public Quote quote(Policy policy, long now) throws SQLException {
+        return database.transact(c -> quote(c, policy, now,
+                scalar(c, "SELECT COALESCE(SUM(quantity),0) FROM bazaar_order_fills WHERE product_id=? AND created_at>=?", policy.productId(), now - HOUR),
+                scalar(c, "SELECT COALESCE(SUM(quantity),0) FROM bazaar_market_maker_transactions WHERE product_id=? AND created_at>=?", policy.productId(), now - HOUR)));
+    }
+
+    /** A consistent display snapshot; trade execution still rechecks its own funded account. */
+    public java.util.Map<String, Quote> quotes(java.util.Collection<Policy> policies, long now) throws SQLException {
+        if (policies.isEmpty()) return java.util.Map.of();
         return database.transact(c -> {
-            Account a = account(c, policy, now, true);
-            long half = policy.spreadBps() / 2L;
-            long bid = Math.max(1, policy.referencePriceMinor() * (10_000 - half) / 10_000);
-            long ask = Math.max(bid + 1, policy.referencePriceMinor() * (10_000 + half) / 10_000);
-            long playerVolume = scalar(c, "SELECT COALESCE(SUM(quantity),0) FROM bazaar_order_fills WHERE product_id=? AND created_at>=?", policy.productId(), now - HOUR);
-            long npcVolume = scalar(c, "SELECT COALESCE(SUM(quantity),0) FROM bazaar_market_maker_transactions WHERE product_id=? AND created_at>=?", policy.productId(), now - HOUR);
-            // Player volume gradually phases out the bootstrap quote size; configured caps remain hard limits.
-            long scale = Math.max(1_000, 10_000 - Math.min(9_000, playerVolume * 100));
-            long askQty = Math.min(a.inventory, policy.maxInventory() * scale / 10_000);
-            askQty = Math.min(askQty, Math.max(0, policy.maxCoinBudgetMinor() - a.coins) / ask);
-            long bidQty = Math.min(a.coins / bid, policy.maxCoinBudgetMinor() * scale / 10_000 / bid);
-            long activityCap = Math.max(1, policy.maxInventory() * scale / 10_000);
-            askQty = Math.min(askQty, Math.max(0, activityCap - npcVolume));
-            bidQty = Math.min(bidQty, Math.max(0, activityCap - npcVolume));
-            return new Quote(policy.npcId(), policy.productId(), bid, bidQty, ask, askQty, true);
+            java.util.Map<String, Long> playerVolumes = volumes(c, "bazaar_order_fills", now - HOUR);
+            java.util.Map<String, Long> npcVolumes = volumes(c, "bazaar_market_maker_transactions", now - HOUR);
+            java.util.Map<String, Quote> result = new java.util.HashMap<>();
+            for (Policy policy : policies) {
+                if (result.containsKey(policy.productId())) throw new IllegalArgumentException("Duplicate quote product");
+                result.put(policy.productId(), quote(c, policy, now, playerVolumes.getOrDefault(policy.productId(), 0L), npcVolumes.getOrDefault(policy.productId(), 0L)));
+            }
+            return java.util.Map.copyOf(result);
         });
+    }
+
+    private java.util.Map<String, Long> volumes(Connection c, String table, long since) throws SQLException {
+        // Table is selected only by this class's two static call sites, never player input.
+        java.util.Map<String, Long> result = new java.util.HashMap<>();
+        try (var query = c.prepareStatement("SELECT product_id,SUM(quantity) FROM " + table + " WHERE created_at>=? GROUP BY product_id")) {
+            query.setLong(1, since);
+            try (var rows = query.executeQuery()) { while (rows.next()) result.put(rows.getString(1), rows.getLong(2)); }
+        }
+        return result;
+    }
+
+    private Quote quote(Connection c, Policy policy, long now, long playerVolume, long npcVolume) throws SQLException {
+        Account a = account(c, policy, now, true);
+        long half = policy.spreadBps() / 2L;
+        long bid = Math.max(1, policy.referencePriceMinor() * (10_000 - half) / 10_000);
+        long ask = Math.max(bid + 1, policy.referencePriceMinor() * (10_000 + half) / 10_000);
+        long scale = Math.max(1_000, 10_000 - Math.min(90, Math.max(0, playerVolume)) * 100);
+        long askQty = Math.min(a.inventory, policy.maxInventory() * scale / 10_000);
+        askQty = Math.min(askQty, Math.max(0, policy.maxCoinBudgetMinor() - a.coins) / ask);
+        long bidQty = Math.min(a.coins / bid, policy.maxCoinBudgetMinor() * scale / 10_000 / bid);
+        long activityCap = Math.max(1, policy.maxInventory() * scale / 10_000);
+        askQty = Math.min(askQty, Math.max(0, activityCap - npcVolume));
+        bidQty = Math.min(bidQty, Math.max(0, activityCap - npcVolume));
+        return new Quote(policy.npcId(), policy.productId(), bid, bidQty, ask, askQty, true);
     }
 
     /** Executes a player sale into a funded NPC bid. The Paper adapter must escrow the items first. */

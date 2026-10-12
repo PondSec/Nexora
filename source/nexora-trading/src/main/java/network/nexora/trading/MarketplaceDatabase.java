@@ -54,6 +54,24 @@ public final class MarketplaceDatabase {
         }
     }
 
+    /** Receipt IDs used by the previous inventory-tag delivery protocol. Claimed items may be traded. */
+    public java.util.Set<String> deliveredItemClaims(java.util.Set<String> ids) throws SQLException {
+        if (ids.isEmpty()) return java.util.Set.of();
+        if (ids.size() > 96 || ids.stream().anyMatch(id -> id == null || id.isBlank() || id.length() > 256))
+            throw new IllegalArgumentException("Invalid legacy claim tag set");
+        String placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        String sql = "SELECT claim_id FROM bazaar_claimables WHERE asset_type='ITEMS' AND claimed_at IS NOT NULL AND claim_id IN (" + placeholders + ")"
+                + " UNION SELECT claim_id FROM auction_claimables WHERE asset_type='ITEM' AND claimed_at IS NOT NULL AND claim_id IN (" + placeholders + ")"
+                + " UNION SELECT claim_id FROM standardized_bazaar_claims WHERE claimed_at IS NOT NULL AND claim_id IN (" + placeholders + ")";
+        java.util.Set<String> result = new java.util.HashSet<>();
+        try (Connection connection = connect(); var query = connection.prepareStatement(sql)) {
+            int index = 1;
+            for (int domain = 0; domain < 3; domain++) for (String id : ids) query.setString(index++, id);
+            try (var rows = query.executeQuery()) { while (rows.next()) result.add(rows.getString(1)); }
+        }
+        return java.util.Set.copyOf(result);
+    }
+
     /** Moves purse funds into the bank and records the purse ledger in the same immediate transaction. */
     public BankResult deposit(UUID profileId, long amountMinor, String operationKey, long nowMillis) throws SQLException {
         validateBankOperation(amountMinor, operationKey);
@@ -313,7 +331,7 @@ public final class MarketplaceDatabase {
     }
 
     private Connection connect() throws SQLException {
-        Connection connection = DriverManager.getConnection(jdbcUrl);
+        Connection connection = network.nexora.core.api.JdbcMetrics.instrument(DriverManager.getConnection(jdbcUrl),network.nexora.core.api.JdbcMetrics.Source.MARKET);
         try (Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA foreign_keys=ON");
             statement.execute("PRAGMA busy_timeout=10000");
@@ -334,6 +352,7 @@ public final class MarketplaceDatabase {
         migrate(connection, 4, "/db/migration/V4__item_instance_reservations.sql");
         migrate(connection, 5, "/db/migration/V5__asset_identity.sql");
         migrate(connection, 6, "/db/migration/V6__standardized_replay_and_resale.sql");
+        migrate(connection, 7, "/db/migration/V7__legacy_claim_recovery.sql");
     }
 
     private void migrate(Connection connection, int version, String resource) throws SQLException {

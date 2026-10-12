@@ -244,6 +244,34 @@ public final class BazaarOrderService {
         });
     }
 
+    /** Acknowledge only the actual legacy-tagged quantity; preserve an undelivered remainder. */
+    public long reconcileLegacyDelivery(UUID owner, String claimId, String product, long original, long delivered, long now) throws SQLException {
+        if (original < 1 || delivered < 1 || delivered > original) throw new IllegalArgumentException("Invalid legacy quantity");
+        return database.transact(c -> {
+            try (var receipt = c.prepareStatement("SELECT owner_uuid,product_id,original_quantity,delivered_quantity FROM legacy_claim_reconciliations WHERE operation_key=?")) {
+                receipt.setString(1, claimId);
+                try (var row = receipt.executeQuery()) {
+                    if (row.next()) {
+                        if (!owner.toString().equals(row.getString(1)) || !product.equals(row.getString(2)) || original != row.getLong(3) || delivered != row.getLong(4))
+                            throw new SQLException("Legacy receipt replay does not match its original delivery");
+                        return original - delivered;
+                    }
+                }
+            }
+            try (var update = c.prepareStatement("UPDATE bazaar_claimables SET quantity=?,claimed_at=? WHERE claim_id=? AND profile_uuid=? AND product_id=? AND quantity=? AND asset_type='ITEMS' AND claimed_at IS NULL")) {
+                update.setLong(1, delivered == original ? original : original - delivered);
+                if (delivered == original) update.setLong(2, now); else update.setNull(2, java.sql.Types.BIGINT);
+                update.setString(3, claimId); update.setString(4, owner.toString()); update.setString(5, product); update.setLong(6, original);
+                if (update.executeUpdate() != 1) throw new SQLException("Legacy claim changed or belongs to another owner");
+            }
+            try (var receipt = c.prepareStatement("INSERT INTO legacy_claim_reconciliations(operation_key,owner_uuid,claim_id,product_id,original_quantity,delivered_quantity,created_at) VALUES(?,?,?,?,?,?,?)")) {
+                receipt.setString(1, claimId); receipt.setString(2, owner.toString()); receipt.setString(3, claimId); receipt.setString(4, product);
+                receipt.setLong(5, original); receipt.setLong(6, delivered); receipt.setLong(7, now); receipt.executeUpdate();
+            }
+            return original - delivered;
+        });
+    }
+
     public void markClaimed(UUID owner, String claimId, long now) throws SQLException {
         database.transact(c -> {
             try (var update = c.prepareStatement("UPDATE bazaar_claimables SET claimed_at=? WHERE claim_id=? AND profile_uuid=? AND asset_type='ITEMS' AND claimed_at IS NULL")) {
