@@ -1,0 +1,134 @@
+hub-island-portal:
+  enabled: true
+  x: 1.3
+  y: 56.0
+  z: 28.9
+  radius-x: 4.0
+  radius-y: 3.0
+  radius-z: 4.0
+hub-build:
+  enabled: false
+hub-spawn:
+  world: nexora_hub
+  x: -2.5
+  y: 64.0
+  z: 0.5
+  yaw: 0.0
+  pitch: 0.0
+recipes:
+  compression-collection-requirement: 1000
+  compression-base-cost: 160
+collections:
+  recipe-unlocks:
+    default: 64
+    lapis: 128
+    redstone: 128
+  milestones:
+  - 1
+  - 10
+  - 50
+  - 100
+  - 250
+  - 500
+  - 1000
+  - 2500
+  - 5000
+  - 10000
+  - 25000
+  - 50000
+  - 100000
+  - 250000
+  - 500000
+  - 1000000
+  - 2500000
+  - 5000000
+  rewards:
+    skyblock-xp-base: 5
+    skyblock-xp-per-tier: 5
+    coins-base: 50
+    coins-per-tier: 25
+minions:
+  textures:
+    carrot: ''
+    potato: ''
+    creeper: ''
+    skeleton: ''
+    spider: ''
+    cow: ''
+    chicken: ''
+    sheep: ''
+    pig: ''
+    cobblestone: ''
+    coal: ''
+    iron: ''
+    gold: ''
+    diamond: ''
+    redstone: ''
+    lapis: ''
+    emerald: ''
+    wheat: ''
+    combat: ''
+    oak_wood: ''
+  max-per-island: 10
+  base-slots: 5
+  base-action-seconds: 60
+  offline-cap-hours: 24
+  storage-per-tier: 64
+  upgrade-base-cost: 25
+progression:
+  skyblock:
+    max-level: 100
+    xp-base: 100
+    xp-linear: 35
+    xp-quadratic: 3
+  skills:
+    max-level: 50
+    xp-base: 50
+    xp-linear: 20
+    xp-quadratic: 2
+  minion-slot-every-levels: 10
+  feedback-cooldown-ms: 1000
+  rewards:
+    skyblock-xp-base: 5
+    skyblock-xp-per-tier: 5
+    skill-level-xp: 10
+    collection-milestone-xp: 25
+    area-discovery-xp: 50
+scoreboard:
+  profile-name: Main
+  refresh-ticks: 40
+daily:
+  timezone: Europe/Berlin
+  quests:
+    mining:
+      target: 15
+      reward-coins: 50
+      reward-xp: 50
+    farming:
+      target: 10
+      reward-coins: 40
+      reward-xp: 40
+    foraging:
+      target: 8
+      reward-coins: 35
+      reward-xp: 35
+starting-balance-coins: 100
+hub-world: nexora_hub
+welcome:
+- '&b&lNEXORA NETWORK'
+- '&7Build your island. Create your empire.'
+- '&7Use &b/island create &7to begin.'
+skills:
+  xp-per-level: 100
+hub:
+  ore-regeneration-delay-ms: 12000
+  generate-platform: false
+  border-size: 1024
+  spawn:
+    x: -115.441
+    y: 81.0
+    z: 357.494
+    yaw: -5.6
+    pitch: 0.0
+mining:
+  regen-delay-ms: 12000

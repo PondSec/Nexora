@@ -1,0 +1,24 @@
+farm:
+  world: nexora_farming
+  animals:
+    per-chunk-per-species: 1
+    species: [CHICKEN, COW, PIG, SHEEP]
+  # Bounds cover the entire Farming island, including the crop plots and paths.
+  animal-area:
+    min-x: -144
+    max-x: 96
+    min-z: -96
+    max-z: 128
+  crop-area:
+    min-x: -144
+    max-x: 96
+    min-z: -96
+    max-z: 128
+  scan-chunks-per-tick: 4
+  replenish-seconds: 300
+  crop-chunk-force-load: true
+  crop-growth:
+    multiplier: 4
+build-access:
+  hub-world: nexora_hub
+  mining-world: nexora_mining
