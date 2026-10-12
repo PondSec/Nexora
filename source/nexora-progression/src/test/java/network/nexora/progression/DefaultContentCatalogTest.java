@@ -7,8 +7,8 @@ import static org.junit.jupiter.api.Assertions.*;
 class DefaultContentCatalogTest {
     @Test void retainsEveryCollectionCurrentlyWrittenByCoreAndRegistersBothCompressionTiers() {
         ContentRegistry catalog = DefaultContentCatalog.create();
-        assertEquals(50, catalog.collections().size());
-        assertEquals(118, catalog.recipes().size());
+        assertEquals(58, catalog.collections().size());
+        assertEquals(152, catalog.recipes().size());
         assertTrue(catalog.collections().containsKey("cobblestone"));
         assertTrue(catalog.collections().containsKey("wheat"));
         assertTrue(catalog.collections().containsKey("birch_wood"));

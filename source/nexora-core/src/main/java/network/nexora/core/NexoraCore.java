@@ -45,6 +45,7 @@ import java.time.ZoneId;
 
 public final class NexoraCore extends JavaPlugin implements Listener {
     private ProgressStore store;
+    private network.nexora.core.api.InventoryJournal inventoryJournal;
     private MinionService minions;
     private SidebarService sidebar;
     private NexoraNavigation navigation;
@@ -58,6 +59,8 @@ public final class NexoraCore extends JavaPlugin implements Listener {
         getConfig().options().copyDefaults(true);saveConfig();
         try { store=new ProgressStore(new java.io.File(getDataFolder(),"nexora.sqlite"),getConfig().getLong("starting-balance-coins",100)*100); }
         catch(SQLException e){getLogger().severe("Could not open Nexora database: "+e.getMessage());getServer().getPluginManager().disablePlugin(this);return;}
+        try { inventoryJournal=new network.nexora.core.api.InventoryJournal(getDataFolder().toPath().resolve("nexora.sqlite")); }
+        catch(SQLException e){getLogger().severe("Inventory recovery unavailable: "+e.getMessage());getServer().getPluginManager().disablePlugin(this);return;}
         getServer().getServicesManager().register(net.milkbowl.vault.economy.Economy.class,economy,this,ServicePriority.Highest);
         setupWorlds();
         startBlockRegeneration();
@@ -71,8 +74,27 @@ public final class NexoraCore extends JavaPlugin implements Listener {
         for(String c:List.of("menu","profile","progress","daily","coins","skills","collections","hub","nexora","minion")){PluginCommand cmd=getCommand(c);if(cmd!=null)cmd.setExecutor(this::command);}
         getLogger().info("NexoraCore enabled; SQLite UUID profiles and Vault economy provider registered.");
     }
+    public void applyInventoryOperation(Player player, network.nexora.core.api.InventoryJournal.Domain domain, String operation, org.bukkit.inventory.ItemStack[] after) throws SQLException {
+        if(!Bukkit.isPrimaryThread())throw new IllegalStateException("Inventory operations require the server thread");
+        inventoryJournal.prepare(player.getUniqueId(),domain,operation,org.bukkit.inventory.ItemStack.serializeItemsAsBytes(player.getInventory().getContents()),org.bukkit.inventory.ItemStack.serializeItemsAsBytes(after));
+        player.getInventory().setContents(after);player.saveData();
+    }
+    public void commitCraftInventory(Player player,String operation) throws SQLException {
+        inventoryJournal.commitCraft(player.getUniqueId(),operation);resolveInventoryOperation(player);
+    }
+    public void resolveInventoryOperation(Player player) throws SQLException {
+        if(!Bukkit.isPrimaryThread())throw new IllegalStateException("Inventory recovery requires the server thread");
+        try {
+            var pending=inventoryJournal.pending(player.getUniqueId());if(pending==null)return;
+            player.getInventory().setContents(org.bukkit.inventory.ItemStack.deserializeItemsFromBytes(pending.committed()?pending.after():pending.before()));
+            player.saveData();inventoryJournal.finish(player.getUniqueId(),pending.operation());
+        }catch(SQLException|RuntimeException error){
+            player.kick(net.kyori.adventure.text.Component.text("Inventory recovery pending. Please reconnect shortly."));throw error;
+        }
+    }
+
     @Override public void onDisable(){if(sidebar!=null)sidebar.stop();if(store!=null)try{store.close();}catch(SQLException e){getLogger().severe("Database close failed: "+e.getMessage());}}
-    @EventHandler public void onJoin(PlayerJoinEvent e){try{store.join(e.getPlayer().getUniqueId(),e.getPlayer().getName());e.getPlayer().setFoodLevel(20);e.getPlayer().setSaturation(20);e.getPlayer().setExhaustion(0);makeToolsUnbreakable(e.getPlayer());if(!e.getPlayer().hasPlayedBefore())welcome(e.getPlayer());World hub=getServer().getWorld(getConfig().getString("hub-world","nexora_hub"));if(hub!=null)getServer().getScheduler().runTask(this,()->{if(e.getPlayer().isOnline()){Location spawn=safeHubSpawn(hub);if(spawn!=null)e.getPlayer().teleportAsync(spawn);else getLogger().severe("Refused unsafe Hub join teleport: no configured safe spawn.");}});}catch(SQLException ex){getLogger().severe("Profile join failed: "+ex.getMessage());}}
+    @EventHandler public void onJoin(PlayerJoinEvent e){try{store.join(e.getPlayer().getUniqueId(),e.getPlayer().getName());resolveInventoryOperation(e.getPlayer());e.getPlayer().setFoodLevel(20);e.getPlayer().setSaturation(20);e.getPlayer().setExhaustion(0);makeToolsUnbreakable(e.getPlayer());if(!e.getPlayer().hasPlayedBefore())welcome(e.getPlayer());World hub=getServer().getWorld(getConfig().getString("hub-world","nexora_hub"));if(hub!=null)getServer().getScheduler().runTask(this,()->{if(e.getPlayer().isOnline()){Location spawn=safeHubSpawn(hub);if(spawn!=null)e.getPlayer().teleportAsync(spawn);else getLogger().severe("Refused unsafe Hub join teleport: no configured safe spawn.");}});}catch(SQLException ex){getLogger().severe("Profile join/recovery failed: "+ex.getMessage());e.getPlayer().kick(net.kyori.adventure.text.Component.text("Your saved inventory needs recovery. Please reconnect shortly."));}}
     @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true)
     public void onHunger(FoodLevelChangeEvent event){if(event.getEntity() instanceof Player player){event.setCancelled(true);player.setFoodLevel(20);player.setSaturation(20);player.setExhaustion(0);}}
     @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true)
@@ -138,25 +160,23 @@ public final class NexoraCore extends JavaPlugin implements Listener {
             if(player.isOnline()&&isHub(player.getWorld()))player.performCommand("island go");
         });
     }
-    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=false) public void onBreak(BlockBreakEvent e){Player p=e.getPlayer();Material m=e.getBlock().getType();String skill=null;
+    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=false) public void protectHubBreak(BlockBreakEvent e){Player p=e.getPlayer();Material m=e.getBlock().getType();
         boolean hub=isHub(e.getBlock().getWorld());
         if(!hub&&e.isCancelled())return;
         if(hub&&!isCreativeOperator(p)){
             if(isHubOre(m)){
                 if(!scheduleHubOreRestore(e.getBlock())){e.setCancelled(true);return;}
                 e.setCancelled(false);
-                skill="mining";
             }else if(isUsefulCrop(m)){
                 e.setCancelled(false);
-                skill="farming";
             }else{e.setCancelled(true);return;}
         }
-        if(Set.of(Material.STONE,Material.COBBLESTONE,Material.COAL_ORE,Material.IRON_ORE,Material.GOLD_ORE,Material.DIAMOND_ORE,Material.EMERALD_ORE,Material.REDSTONE_ORE,Material.LAPIS_ORE,Material.DEEPSLATE,Material.DEEPSLATE_COAL_ORE,Material.DEEPSLATE_IRON_ORE,Material.DEEPSLATE_GOLD_ORE,Material.DEEPSLATE_DIAMOND_ORE,Material.DEEPSLATE_EMERALD_ORE,Material.DEEPSLATE_REDSTONE_ORE,Material.DEEPSLATE_LAPIS_ORE).contains(m))skill="mining";
-        else if(Set.of(Material.WHEAT,Material.CARROTS,Material.POTATOES,Material.MELON,Material.PUMPKIN,Material.SUGAR_CANE).contains(m)){
-            if(e.getBlock().getBlockData() instanceof org.bukkit.block.data.Ageable ageable && ageable.getAge()<ageable.getMaximumAge())return;
-            skill="farming";
-        }
-        else if(m.name().endsWith("_LOG")||m==Material.OAK_WOOD||m==Material.SPRUCE_WOOD||m==Material.BIRCH_WOOD)skill="foraging";
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void onBreak(BlockBreakEvent e){
+        Player p=e.getPlayer();Material m=e.getBlock().getType();
+        String skill=GatheringPolicy.skill(m);
+        if(e.getBlock().getBlockData() instanceof org.bukkit.block.data.Ageable ageable && "farming".equals(skill) && ageable.getAge()<ageable.getMaximumAge())return;
         if(skill!=null){String collection=collectionKey(m);try{
             if(store.consumePlacedBlock(e.getBlock().getWorld().getName(),e.getBlock().getX(),e.getBlock().getY(),e.getBlock().getZ()))return;
             long oldSkyXp=store.skyblockXp(p.getUniqueId());
@@ -226,25 +246,14 @@ public final class NexoraCore extends JavaPlugin implements Listener {
     public void onMobDrops(EntityDeathEvent event){
         Player player=event.getEntity().getKiller();
         if(player==null)return;
-        Material trackedDrop=switch(event.getEntityType()){
-            case ZOMBIE->Material.ROTTEN_FLESH;case CREEPER->Material.GUNPOWDER;case SKELETON->Material.BONE;
-            case SPIDER,CAVE_SPIDER->Material.STRING;case COW->Material.LEATHER;case CHICKEN->Material.FEATHER;
-            case SHEEP->null;case PIG->Material.PORKCHOP;case ENDERMAN->Material.ENDER_PEARL;
-            case BLAZE->Material.BLAZE_ROD;case MAGMA_CUBE->Material.MAGMA_CREAM;case GHAST->Material.GHAST_TEAR;
-            default->null;
-        };
-        String collection=trackedDrop==null?null:collectionKey(trackedDrop);
-        long amount=trackedDrop==null?0:event.getDrops().stream().filter(stack->stack.getType()==trackedDrop).mapToLong(ItemStack::getAmount).sum();
-        try{
-            long oldXp=store.skyblockXp(player.getUniqueId());
-            ProgressStore.GatherResult result=store.recordGather(player.getUniqueId(),"combat",amount>0?collection:null,1,
-                    amount>0?amount:0,getConfig().getLongList("collections.milestones"),
-                    getConfig().getLong("progression.rewards.skill-level-xp",10),
-                    getConfig().getLong("progression.rewards.collection-milestone-xp",25),skillCurve(),dailyDay(),dailyTargets());
-            notifySkyXp(player,oldXp,store.skyblockXp(player.getUniqueId()));
-            if(result.skillLevelAfter()>result.skillLevelBefore())player.sendMessage(PREFIX+"Combat skill reached level §b"+result.skillLevelAfter()+"§7.");
-            if(result.collectionMilestones()>0)player.sendMessage(PREFIX+"Collection milestone reached: §b"+title(collection)+" §7("+result.collectionCount()+").");
-        }catch(SQLException ex){getLogger().warning("Combat progress save failed: "+ex.getMessage());}
+        Map<String,Long> gathered=new LinkedHashMap<>();
+        for(ItemStack stack:event.getDrops()) {
+            String collection=collectionKey(stack.getType());
+            if(collection!=null)gathered.merge(collection,(long)stack.getAmount(),Long::sum);
+        }
+        if(gathered.isEmpty())awardDirectGather(player.getUniqueId(),"combat",null,1,0);
+        boolean first=true;
+        for(var entry:gathered.entrySet()) { awardDirectGather(player.getUniqueId(),"combat",entry.getKey(),first?1:0,entry.getValue());first=false; }
         if(!autoPickupEnabled(player))return;
         Location location=event.getEntity().getLocation();
         for(ItemStack stack:new ArrayList<>(event.getDrops())){
@@ -257,8 +266,10 @@ public final class NexoraCore extends JavaPlugin implements Listener {
         try{return ProgressionMath.sky(store.skyblockXp(player.getUniqueId()),skyCurve()).level()>=5;}
         catch(SQLException ex){getLogger().warning("Could not check auto-pickup level: "+ex.getMessage());return false;}
     }
-    @EventHandler(ignoreCancelled=true) public void onPlace(BlockPlaceEvent e){
-        if(isHub(e.getBlock().getWorld())){e.setCancelled(true);return;}
+    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true) public void protectHubPlace(BlockPlaceEvent e){
+        if(isHub(e.getBlock().getWorld()))e.setCancelled(true);
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true) public void onPlace(BlockPlaceEvent e){
         if(collectionKey(e.getBlockPlaced().getType())!=null)try{var b=e.getBlockPlaced();store.markPlacedBlock(b.getWorld().getName(),b.getX(),b.getY(),b.getZ(),e.getPlayer().getUniqueId(),b.getType().name());}
         catch(SQLException ex){getLogger().warning("Could not mark placed progress block: "+ex.getMessage());}
     }
@@ -303,7 +314,37 @@ public final class NexoraCore extends JavaPlugin implements Listener {
         if(!ground.isSolid()||ground==Material.LAVA||ground==Material.MAGMA_BLOCK||!target.getBlock().isPassable()||!target.clone().add(0,1,0).getBlock().isPassable())return null;
         return target;
     }
-    private String collectionKey(Material m){return switch(m){case STONE,COBBLESTONE->"cobblestone";case COAL_ORE,DEEPSLATE_COAL_ORE,COAL->"coal";case IRON_ORE,DEEPSLATE_IRON_ORE,IRON_INGOT->"iron";case GOLD_ORE,DEEPSLATE_GOLD_ORE,GOLD_INGOT->"gold";case DIAMOND_ORE,DEEPSLATE_DIAMOND_ORE,DIAMOND->"diamond";case EMERALD_ORE,DEEPSLATE_EMERALD_ORE,EMERALD->"emerald";case REDSTONE_ORE,DEEPSLATE_REDSTONE_ORE,REDSTONE->"redstone";case LAPIS_ORE,DEEPSLATE_LAPIS_ORE,LAPIS_LAZULI->"lapis";case WHEAT->"wheat";case CARROTS->"carrot";case POTATOES->"potato";case MELON->"melon";case PUMPKIN->"pumpkin";case SUGAR_CANE->"sugar_cane";case OAK_LOG, OAK_WOOD->"oak_wood";case SPRUCE_LOG,SPRUCE_WOOD->"spruce_wood";case BIRCH_LOG,BIRCH_WOOD->"birch_wood";case LEATHER->"leather";case FEATHER->"feather";case CHICKEN->"raw_chicken";case BEEF->"raw_beef";case PORKCHOP->"raw_porkchop";case ROTTEN_FLESH->"rotten_flesh";case BONE->"bone";case STRING->"string";case SPIDER_EYE->"spider_eye";case GUNPOWDER->"gunpowder";case SLIME_BALL->"slimeball";case ENDER_PEARL->"ender_pearl";case BLAZE_ROD->"blaze_rod";case MAGMA_CREAM->"magma_cream";case GHAST_TEAR->"ghast_tear";default->null;};}
+    private String collectionKey(Material material){return GatheringPolicy.collectionId(material);}
+    public void awardDirectGather(UUID profile,String skill,String collection,long xp,long amount) {
+        try {
+            long oldXp=store.skyblockXp(profile);
+            var result=store.recordGather(profile,skill,collection,xp,amount,getConfig().getLongList("collections.milestones"),
+                    getConfig().getLong("progression.rewards.skill-level-xp",10),getConfig().getLong("progression.rewards.collection-milestone-xp",25),skillCurve(),dailyDay(),dailyTargets());
+            Player player=Bukkit.getPlayer(profile);
+            if(player!=null){notifySkyXp(player,oldXp,store.skyblockXp(profile));if(result.skillLevelAfter()>result.skillLevelBefore())player.sendMessage(PREFIX+title(skill)+" reached level §b"+result.skillLevelAfter());}
+        }catch(SQLException error){getLogger().severe("Direct gathering save failed: "+error.getMessage());}
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void onFish(org.bukkit.event.player.PlayerFishEvent event) {
+        if(event.getState()!=org.bukkit.event.player.PlayerFishEvent.State.CAUGHT_FISH || !(event.getCaught() instanceof org.bukkit.entity.Item item))return;
+        String collection=collectionKey(item.getItemStack().getType());
+        awardDirectGather(event.getPlayer().getUniqueId(),"fishing",collection,5,collection==null?0:item.getItemStack().getAmount());
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void onEnchant(org.bukkit.event.enchantment.EnchantItemEvent event) {
+        awardDirectGather(event.getEnchanter().getUniqueId(),"enchanting",null,Math.max(1,event.getExpLevelCost())*5L,0);
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void rememberBrewer(PlayerInteractEvent event) {
+        if(event.getAction()!=org.bukkit.event.block.Action.RIGHT_CLICK_BLOCK || event.getClickedBlock()==null || !(event.getClickedBlock().getState() instanceof org.bukkit.block.BrewingStand brewer))return;
+        brewer.getPersistentDataContainer().set(new org.bukkit.NamespacedKey(this,"brew_owner"),org.bukkit.persistence.PersistentDataType.STRING,event.getPlayer().getUniqueId().toString());brewer.update(false,false);
+    }
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void onBrew(org.bukkit.event.inventory.BrewEvent event) {
+        if(!(event.getBlock().getState() instanceof org.bukkit.block.BrewingStand brewer))return;
+        String owner=brewer.getPersistentDataContainer().get(new org.bukkit.NamespacedKey(this,"brew_owner"),org.bukkit.persistence.PersistentDataType.STRING);
+        if(owner!=null)try{awardDirectGather(UUID.fromString(owner),"alchemy",null,15,0);}catch(IllegalArgumentException error){getLogger().warning("Invalid brewer owner");}
+    }
     private boolean command(CommandSender sender,Command cmd,String label,String[] args){if(!(sender instanceof Player p)){sender.sendMessage("Player only.");return true;}try{UUID id=p.getUniqueId();switch(cmd.getName().toLowerCase(Locale.ROOT)){
         case "coins"->p.sendMessage(PREFIX+"Balance: §6"+format(store.balance(id))+" Coins");
         case "profile"->openProfile(p);
@@ -332,7 +373,7 @@ public final class NexoraCore extends JavaPlugin implements Listener {
     private String progressBar(long current,long required){int filled=required<=0?10:(int)Math.min(10,Math.max(0,(current*10)/required));return "§6"+"▰".repeat(filled)+"§8"+"▱".repeat(10-filled);}
     private void welcome(Player p){for(String line:getConfig().getStringList("welcome"))p.sendMessage(ChatColor.translateAlternateColorCodes('&',line));}
     ProgressionMath.Curve skyCurve(){return new ProgressionMath.Curve(getConfig().getLong("progression.skyblock.xp-base",100),getConfig().getLong("progression.skyblock.xp-linear",35),getConfig().getLong("progression.skyblock.xp-quadratic",3),getConfig().getInt("progression.skyblock.max-level",100));}
-    ProgressionMath.Curve skillCurve(){return new ProgressionMath.Curve(getConfig().getLong("progression.skills.xp-base",50),getConfig().getLong("progression.skills.xp-linear",20),getConfig().getLong("progression.skills.xp-quadratic",2),getConfig().getInt("progression.skills.max-level",50));}
+    public ProgressionMath.Curve skillCurve(){return new ProgressionMath.Curve(getConfig().getLong("progression.skills.xp-base",50),getConfig().getLong("progression.skills.xp-linear",20),getConfig().getLong("progression.skills.xp-quadratic",2),getConfig().getInt("progression.skills.max-level",50));}
     int unlockedMinionSlots(int level){int base=getConfig().getInt("minions.base-slots",2),every=Math.max(1,getConfig().getInt("progression.minion-slot-every-levels",10)),max=getConfig().getInt("minions.max-per-island",10);return Math.min(max,base+Math.max(0,(level-1)/every));}
     private String dailyDay(){return LocalDate.now(ZoneId.of(getConfig().getString("daily.timezone","Europe/Berlin"))).toString();}
     private Map<String,Long> dailyTargets(){Map<String,Long> out=new LinkedHashMap<>();for(String q:List.of("mining","farming","foraging"))out.put(q,getConfig().getLong("daily.quests."+q+".target",0));return out;}
@@ -394,7 +435,7 @@ public final class NexoraCore extends JavaPlugin implements Listener {
         Inventory inv=menu(player,"SKILLS");
         Map<String,Long> values=store.skills(player.getUniqueId());
         int slot=10;
-        for(String skill:List.of("mining","farming","foraging","combat")){
+        for(String skill:List.of("mining","farming","foraging","combat","fishing","enchanting","alchemy")){
             long xp=values.getOrDefault(skill,0L);ProgressionMath.LevelProgress progress=ProgressionMath.skill(xp,skillCurve());
             inv.setItem(slot,menuItem(switch(skill){case "mining"->Material.IRON_PICKAXE;case "farming"->Material.WHEAT;case "foraging"->Material.OAK_LOG;default->Material.IRON_SWORD;},
                     "§b"+title(skill)+" §8• §fLevel "+progress.level(),"§7Total XP: §f"+xp,"§7Progress: §b"+progress.currentXp()+"§7/§b"+progress.requiredXp()+" XP",progressBar(progress.currentXp(),progress.requiredXp()),"§7Reward per skill level: §e+"+getConfig().getLong("progression.rewards.skill-level-xp",10)+" SkyBlock XP","§7Level cap: §f"+progress.maxLevel()));slot+=2;
@@ -409,7 +450,7 @@ public final class NexoraCore extends JavaPlugin implements Listener {
         int nextSlotLevel=unlockedMinionSlots(level.level())>=getConfig().getInt("minions.max-per-island",10)?0:((level.level()/interval)+1)*interval;
         inv.setItem(4,menuItem(Material.NETHER_STAR,"§6§lSkyBlock Level "+level.level(),"§7Progress: §f"+level.currentXp()+"§7/§f"+level.requiredXp()+" XP",progressBar(level.currentXp(),level.requiredXp()),"§7Lifetime XP: §f"+level.totalXp(),"§7Level cap: §f"+level.maxLevel(),nextSlotLevel==0?"§aAll minion slots unlocked.":"§eNext reward: +1 Minion Slot at level "+nextSlotLevel));
         Map<String,Long> skills=store.skills(id);int slot=10;
-        for(String skill:List.of("mining","farming","foraging","combat")){
+        for(String skill:List.of("mining","farming","foraging","combat","fishing","enchanting","alchemy")){
             long total=skills.getOrDefault(skill,0L);ProgressionMath.LevelProgress progress=ProgressionMath.skill(total,skillCurve());
             Material icon=switch(skill){case "mining"->Material.IRON_PICKAXE;case "farming"->Material.WHEAT;case "foraging"->Material.OAK_LOG;default->Material.IRON_SWORD;};
             inv.setItem(slot,menuItem(icon,"§b"+title(skill)+" §8• §fLevel "+progress.level(),"§7XP: §f"+total,"§7To next: §f"+progress.currentXp()+"/"+progress.requiredXp(),progressBar(progress.currentXp(),progress.requiredXp()),"§7Reward per level: §e+"+getConfig().getLong("progression.rewards.skill-level-xp",10)+" SkyBlock XP","§7Cap: §f"+progress.maxLevel()));slot+=2;

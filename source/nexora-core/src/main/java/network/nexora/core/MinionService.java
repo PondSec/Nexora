@@ -40,15 +40,26 @@ final class MinionService implements Listener {
     private final ProgressStore store;
     private final NamespacedKey itemTypeKey;
     private final NamespacedKey entityIdKey;
+    private final NamespacedKey tierKey;
     private final Map<String, MinionType> types = new LinkedHashMap<>();
+    private final Set<ChunkKey> pendingChunks = new LinkedHashSet<>();
+    private record ChunkKey(UUID world,int x,int z) {}
 
     MinionService(JavaPlugin plugin, ProgressStore store) {
         this.plugin = plugin;
         this.store = store;
         itemTypeKey = new NamespacedKey(plugin, "minion_item_type");
         entityIdKey = new NamespacedKey(plugin, "minion_id");
+        tierKey = new NamespacedKey(plugin, "minion_tier");
         for (MinionType type : MinionType.values()) types.put(type.key, type);
         registerRecipes();
+        Bukkit.getScheduler().runTaskTimer(plugin,()->{
+            var box=BentoBox.getInstance();if(box==null||!box.isLoaded())return;
+            int budget=4;var iterator=pendingChunks.iterator();
+            List<ChunkKey> ready=new ArrayList<>();
+            while(iterator.hasNext()&&budget-->0){ready.add(iterator.next());iterator.remove();}
+            for(var key:ready){World world=Bukkit.getWorld(key.world());if(world!=null&&world.isChunkLoaded(key.x(),key.z()))restoreChunk(world.getChunkAt(key.x(),key.z()));}
+        },20L,20L);
     }
 
     boolean command(Player player, String[] args) {
@@ -115,26 +126,21 @@ final class MinionService implements Listener {
             }
             Location at = target.getLocation().add(0.5, 0.02, 0.5);
             String id = UUID.randomUUID().toString();
-            ItemStack refund = held.clone(); refund.setAmount(1);
-            consumeOne(player, held);
-            ArmorStand stand = null;
-            boolean saved = false;
+            int portableTier = held.getItemMeta().getPersistentDataContainer().getOrDefault(tierKey, PersistentDataType.INTEGER, 1);
+            if (portableTier < 1 || portableTier > 11) { player.sendMessage(PREFIX + "Invalid minion tier."); return; }
+            ItemStack[] after=cloneContents(player);
+            int heldSlot=event.getHand()==org.bukkit.inventory.EquipmentSlot.OFF_HAND?40:player.getInventory().getHeldItemSlot();
+            after[heldSlot]=held.clone();after[heldSlot].setAmount(held.getAmount()-1);if(after[heldSlot].getAmount()==0)after[heldSlot]=null;
+            ((NexoraCore)plugin).applyInventoryOperation(player,network.nexora.core.api.InventoryJournal.Domain.MINION_PLACE,id,after);
             try {
                 store.createMinion(id, player.getUniqueId(), ownedIsland.getUniqueId(),
-                        at.getWorld().getName(), target.getX(), target.getY(), target.getZ(), type.key, System.currentTimeMillis());
-                saved = true;
-                stand = spawn(type, at, id, 1, 0, capacity(1));
-                long oldXp=store.skyblockXp(player.getUniqueId());
-                if(store.awardMinionType(player.getUniqueId(),type.key)){
-                    ((NexoraCore)plugin).notifySkyXp(player,oldXp,store.skyblockXp(player.getUniqueId()));
-                    player.sendMessage(PREFIX+"First §b"+type.label+" Minion §7unlocked: §e+25 SkyBlock XP§7.");
-                }
-            } catch (SQLException | RuntimeException e) {
-                if (stand != null) stand.remove();
-                if (saved) try { store.deleteMinion(id, player.getUniqueId()); } catch (SQLException cleanup) { e.addSuppressed(cleanup); }
-                Map<Integer, ItemStack> overflow = player.getInventory().addItem(refund);
-                overflow.values().forEach(stack -> player.getWorld().dropItemNaturally(player.getLocation(), stack));
-                throw e;
+                        at.getWorld().getName(), target.getX(), target.getY(), target.getZ(), type.key, portableTier, System.currentTimeMillis());
+            }finally{((NexoraCore)plugin).resolveInventoryOperation(player);}
+            spawn(type,at,id,portableTier,0,capacity(portableTier));
+            long oldXp=store.skyblockXp(player.getUniqueId());
+            if(store.awardMinionType(player.getUniqueId(),type.key)) {
+                ((NexoraCore)plugin).notifySkyXp(player,oldXp,store.skyblockXp(player.getUniqueId()));
+                player.sendMessage(PREFIX+"First §b"+type.label+" Minion §7unlocked: §e+25 SkyBlock XP§7.");
             }
             player.sendMessage(PREFIX + type.label + " Minion placed. Right-click it to manage its storage and tier.");
         } catch (SQLException e) {
@@ -174,9 +180,14 @@ final class MinionService implements Listener {
         try {
             if (row.storage() > 0) { player.sendMessage(PREFIX + "Collect the stored resources before picking this minion up."); return; }
             if (player.getInventory().firstEmpty() < 0) { player.sendMessage(PREFIX + "Make one free inventory slot before picking this minion up."); return; }
-            if (!store.deleteMinion(row.id(), player.getUniqueId())) return;
+            String operation=UUID.randomUUID().toString();ItemStack[] after=cloneContents(player);
+            after[player.getInventory().firstEmpty()]=minionItem(type(row.type()),row.tier());
+            ((NexoraCore)plugin).applyInventoryOperation(player,network.nexora.core.api.InventoryJournal.Domain.MINION_PICKUP,operation,after);
+            boolean picked;
+            try { picked=store.pickupMinion(row.id(),player.getUniqueId(),operation); }
+            finally{((NexoraCore)plugin).resolveInventoryOperation(player);}
+            if(!picked)return;
             entity.remove();
-            player.getInventory().addItem(minionItem(type(row.type())));
             player.sendMessage(PREFIX + "Minion picked up.");
         } catch (SQLException e) {
             plugin.getLogger().severe("Could not pick up minion: " + e.getMessage());
@@ -211,8 +222,12 @@ final class MinionService implements Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     public void onMinionChunkLoad(org.bukkit.event.world.ChunkLoadEvent event) {
+        if(!event.getWorld().getName().equalsIgnoreCase("bskyblock_world"))return;
+        pendingChunks.add(new ChunkKey(event.getWorld().getUID(),event.getChunk().getX(),event.getChunk().getZ()));
+    }
+    private void restoreChunk(org.bukkit.Chunk chunk) {
         Set<String> active = new HashSet<>();
-        for (Entity entity : event.getChunk().getEntities()) {
+        for (Entity entity : chunk.getEntities()) {
             String id = entity.getPersistentDataContainer().get(entityIdKey, PersistentDataType.STRING);
             if (id == null) continue;
             try {
@@ -222,10 +237,11 @@ final class MinionService implements Listener {
             } catch (SQLException e) { plugin.getLogger().warning("Could not validate saved minion entity: " + e.getMessage()); }
         }
         try {
-            for (ProgressStore.MinionRow row : store.minionsInChunk(event.getWorld().getName(), event.getChunk().getX(), event.getChunk().getZ())) {
-                Location location = new Location(event.getWorld(), row.x() + 0.5, row.y() + 0.02, row.z() + 0.5);
+            for (ProgressStore.MinionRow row : store.minionsInChunk(chunk.getWorld().getName(), chunk.getX(), chunk.getZ())) {
+                Location location = new Location(chunk.getWorld(), row.x() + 0.5, row.y() + 0.02, row.z() + 0.5);
                 if (islandAt(location).filter(i -> i.getUniqueId().equals(row.islandId())).isEmpty()) {
-                    store.deleteMinion(row.id(), row.owner());
+                    // A missing island can be temporary during addon/database startup. Never
+                    // delete production or resources based on an unavailable permission context.
                     continue;
                 }
                 if (!active.contains(row.id())) spawn(type(row.type()), location, row.id(), row.tier(), row.storage(), capacity(row.tier()));
@@ -250,7 +266,7 @@ final class MinionService implements Listener {
         inventory.setItem(7, named(Material.GOLD_INGOT, row.tier() >= 11 ? "§cMaximum tier reached" : "§aUpgrade to tier " + (row.tier() + 1),
                 row.tier() >= 11 ? "§7This minion is fully upgraded." : "§7Cost: §6" + cost + " Coins", "§eClick to upgrade."));
         renderStorageSlots(inventory, row, type);
-        inventory.setItem(45, named(Material.BARRIER, "§cSneak-punch to pick up", "§7Collect stored resources first."));
+        inventory.setItem(45, named(Material.BARRIER, "§cSneak-right-click to pick up", "§7Collect stored resources first."));
         player.openInventory(inventory);
     }
 
@@ -281,25 +297,30 @@ final class MinionService implements Listener {
         }
     }
 
-    private void collect(Player player, ProgressStore.MinionRow row) throws SQLException {
-        int collected = store.takeMinionStorage(row.id(), player.getUniqueId(), row.storage());
-        if (collected <= 0) { player.sendMessage(PREFIX + "This minion has no resources ready."); return; }
-        ItemStack stack = new ItemStack(type(row.type()).output, collected);
-        Map<Integer, ItemStack> overflow = player.getInventory().addItem(stack);
-        int returned = overflow.values().stream().mapToInt(ItemStack::getAmount).sum();
-        if (returned > 0) store.returnMinionStorage(row.id(), returned, capacity(row.tier()));
-        player.sendMessage(PREFIX + "Collected " + (collected - returned) + " " + type(row.type()).outputLabel + ".");
+    private ItemStack[] cloneContents(Player player) {
+        ItemStack[] next=player.getInventory().getContents();for(int i=0;i<next.length;i++)next[i]=next[i]==null?null:next[i].clone();return next;
     }
-
-    private void collectSlot(Player player, ProgressStore.MinionRow row, int index) throws SQLException {
-        int amount = Math.min(64, Math.max(0, row.storage() - index * 64));
-        if (amount <= 0) return;
-        int collected = store.takeMinionStorage(row.id(), player.getUniqueId(), amount);
-        if (collected <= 0) return;
-        Map<Integer, ItemStack> overflow = player.getInventory().addItem(new ItemStack(type(row.type()).output, collected));
-        int returned = overflow.values().stream().mapToInt(ItemStack::getAmount).sum();
-        if (returned > 0) store.returnMinionStorage(row.id(), returned, capacity(row.tier()));
-        if (collected > returned) player.sendMessage(PREFIX + "Collected " + (collected - returned) + " " + type(row.type()).outputLabel + ".");
+    private void collect(Player player, ProgressStore.MinionRow row) throws SQLException { collectAmount(player,row,row.storage()); }
+    private void collectSlot(Player player,ProgressStore.MinionRow row,int index)throws SQLException { collectAmount(player,row,Math.min(64,Math.max(0,row.storage()-index*64))); }
+    private void collectAmount(Player player,ProgressStore.MinionRow row,int requested)throws SQLException {
+        if(requested<=0){player.sendMessage(PREFIX+"No resources ready.");return;}
+        ItemStack[] after=cloneContents(player);Material output=type(row.type()).output;
+        ItemStack prototype=new ItemStack(output);int remaining=requested;
+        for(int i=0;i<36&&remaining>0;i++) {
+            if(after[i]==null||!after[i].isSimilar(prototype))continue;
+            int moved=Math.min(remaining,Math.max(0,output.getMaxStackSize()-after[i].getAmount()));after[i].setAmount(after[i].getAmount()+moved);remaining-=moved;
+        }
+        for(int i=0;i<36&&remaining>0;i++) {
+            if(after[i]!=null&&!after[i].getType().isAir())continue;
+            int moved=Math.min(remaining,output.getMaxStackSize());after[i]=new ItemStack(output,moved);remaining-=moved;
+        }
+        int count=requested-remaining;if(count<=0){player.sendMessage(PREFIX+"Free inventory space first.");return;}
+        String operation=UUID.randomUUID().toString();
+        ((NexoraCore)plugin).applyInventoryOperation(player,network.nexora.core.api.InventoryJournal.Domain.MINION_COLLECT,operation,after);
+        int collected;
+        try {collected=store.takeMinionStorage(row.id(),player.getUniqueId(),count,operation);}
+        finally{((NexoraCore)plugin).resolveInventoryOperation(player);}
+        if(collected>0)player.sendMessage(PREFIX+"Collected "+collected+" "+type(row.type()).outputLabel+".");
     }
 
     private void upgrade(Player player, ProgressStore.MinionRow row) throws SQLException {
@@ -336,12 +357,17 @@ final class MinionService implements Listener {
             entity.getEquipment().setHelmet(new ItemStack(type.icon));
         });
     }
-    private ItemStack minionItem(MinionType type) {
-        ItemStack item = new ItemStack(Material.ARMOR_STAND);
+    private ItemStack minionItem(MinionType type) { return minionItem(type, 1); }
+    private ItemStack minionItem(MinionType type, int tier) {
+        var catalog=Bukkit.getServicesManager().load(network.nexora.core.api.CustomItemCatalog.class);
+        ItemStack item=catalog==null?new ItemStack(Material.ARMOR_STAND):catalog.create("nexora:minion_"+type.key,1);
         ItemMeta meta = item.getItemMeta();
-        meta.setDisplayName("§b" + type.label + " Minion §8[T1]");
+        meta.getPersistentDataContainer().set(NamespacedKey.fromString("nexoraprogression:item_id"),PersistentDataType.STRING,"nexora:minion_"+type.key);
+        meta.getPersistentDataContainer().set(NamespacedKey.fromString("nexoraprogression:item_version"),PersistentDataType.INTEGER,1);
+        meta.setDisplayName("§b" + type.label + " Minion §8[T" + tier + "]");
         meta.setLore(List.of("§7Place on an island where you can build.", "§7Right-click to manage generated resources.", "§8NEXORA MINION:" + type.key));
         meta.getPersistentDataContainer().set(itemTypeKey, PersistentDataType.STRING, type.key);
+        meta.getPersistentDataContainer().set(tierKey, PersistentDataType.INTEGER, tier);
         item.setItemMeta(meta);
         return item;
     }
@@ -357,7 +383,9 @@ final class MinionService implements Listener {
         }
     }
     private MinionType itemType(ItemStack item) {
-        if (item == null || !item.hasItemMeta()) return null;
+        if (item == null || item.getType()!=Material.ARMOR_STAND || !item.hasItemMeta()) return null;
+        var catalog=Bukkit.getServicesManager().load(network.nexora.core.api.CustomItemCatalog.class);
+        if(catalog!=null && catalog.identify(item)==null)return null;
         String key = item.getItemMeta().getPersistentDataContainer().get(itemTypeKey, PersistentDataType.STRING);
         return key == null ? null : types.get(key);
     }
@@ -365,7 +393,14 @@ final class MinionService implements Listener {
         ItemStack item = new ItemStack(material); ItemMeta meta = item.getItemMeta();
         meta.setDisplayName(name); meta.setLore(List.of(lore)); item.setItemMeta(meta); return item;
     }
-    private void consumeOne(Player player, ItemStack item) { if (item.getAmount() <= 1) player.getInventory().setItemInMainHand(null); else item.setAmount(item.getAmount() - 1); }
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onMenuDrag(org.bukkit.event.inventory.InventoryDragEvent event) {
+        if (event.getView().getTopInventory().getHolder() instanceof MinionHolder) event.setCancelled(true);
+    }
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onManipulate(org.bukkit.event.player.PlayerArmorStandManipulateEvent event) {
+        if (event.getRightClicked().getPersistentDataContainer().has(entityIdKey, PersistentDataType.STRING)) event.setCancelled(true);
+    }
     private Optional<Island> islandAt(Location location) {
         BentoBox bentobox = BentoBox.getInstance();
         if (bentobox == null || !bentobox.isLoaded()) return Optional.empty();
@@ -403,6 +438,12 @@ final class MinionService implements Listener {
         WHEAT("wheat", "Wheat", Material.WHEAT, Material.WHEAT, "Wheat"),
         CARROT("carrot", "Carrot", Material.CARROT, Material.CARROT, "Carrot"),
         POTATO("potato", "Potato", Material.POTATO, Material.POTATO, "Potato"),
+        MELON("melon", "Melon", Material.MELON, Material.MELON_SLICE, "Melon"),
+        PUMPKIN("pumpkin", "Pumpkin", Material.PUMPKIN, Material.PUMPKIN, "Pumpkin"),
+        SPRUCE_WOOD("spruce_wood", "Spruce Wood", Material.SPRUCE_LOG, Material.SPRUCE_LOG, "Spruce Log"),
+        ZOMBIE("zombie", "Zombie", Material.ROTTEN_FLESH, Material.ROTTEN_FLESH, "Rotten Flesh"),
+        SKELETON("skeleton", "Skeleton", Material.BONE, Material.BONE, "Bone"),
+        SPIDER("spider", "Spider", Material.STRING, Material.STRING, "String"),
         OAK_WOOD("oak_wood", "Oak Wood", Material.OAK_LOG, Material.OAK_LOG, "Oak Log");
         private final String key, label, outputLabel;
         private final Material icon, output;

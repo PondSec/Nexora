@@ -17,16 +17,20 @@ final class ProgressStore implements AutoCloseable {
 
     ProgressStore(File file, long startingBalanceMinor) throws SQLException {
         file.getParentFile().mkdirs();
-        connection = DriverManager.getConnection("jdbc:sqlite:" + file.getAbsolutePath());
+        org.sqlite.SQLiteConfig sqlite = new org.sqlite.SQLiteConfig();
+        sqlite.setTransactionMode(org.sqlite.SQLiteConfig.TransactionMode.IMMEDIATE);
+        connection = DriverManager.getConnection("jdbc:sqlite:" + file.getAbsolutePath(), sqlite.toProperties());
         try (Statement s = connection.createStatement()) {
             s.execute("PRAGMA journal_mode=WAL");
             s.execute("PRAGMA foreign_keys=ON");
-            s.execute("PRAGMA busy_timeout=5000");
+            s.execute("PRAGMA busy_timeout=10000");
+            s.execute("PRAGMA synchronous=FULL");
             s.execute("CREATE TABLE IF NOT EXISTS profiles(uuid TEXT PRIMARY KEY, username TEXT NOT NULL, first_join INTEGER NOT NULL, last_join INTEGER NOT NULL, balance_minor INTEGER NOT NULL CHECK(balance_minor>=0), total_earned_minor INTEGER NOT NULL DEFAULT 0, skyblock_xp INTEGER NOT NULL DEFAULT 0 CHECK(skyblock_xp>=0))");
             s.execute("CREATE TABLE IF NOT EXISTS skills(uuid TEXT NOT NULL REFERENCES profiles(uuid), skill TEXT NOT NULL, xp INTEGER NOT NULL DEFAULT 0 CHECK(xp>=0), PRIMARY KEY(uuid,skill))");
             s.execute("CREATE TABLE IF NOT EXISTS collections(uuid TEXT NOT NULL REFERENCES profiles(uuid), item TEXT NOT NULL, amount INTEGER NOT NULL DEFAULT 0 CHECK(amount>=0), PRIMARY KEY(uuid,item))");
             s.execute("CREATE TABLE IF NOT EXISTS economy_ledger(id TEXT PRIMARY KEY, uuid TEXT NOT NULL, delta_minor INTEGER NOT NULL, reason TEXT NOT NULL, created_at INTEGER NOT NULL)");
             s.execute("CREATE TABLE IF NOT EXISTS minions(id TEXT PRIMARY KEY, owner_uuid TEXT NOT NULL REFERENCES profiles(uuid), island_id TEXT NOT NULL, world TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, z INTEGER NOT NULL, type TEXT NOT NULL, tier INTEGER NOT NULL CHECK(tier BETWEEN 1 AND 11), storage INTEGER NOT NULL DEFAULT 0 CHECK(storage>=0), last_action INTEGER NOT NULL, UNIQUE(world,x,y,z))");
+            s.execute("CREATE TABLE IF NOT EXISTS minion_inventory_receipts(operation_key TEXT PRIMARY KEY,owner_uuid TEXT NOT NULL REFERENCES profiles(uuid),minion_id TEXT NOT NULL,quantity INTEGER NOT NULL CHECK(quantity>=0),created_at INTEGER NOT NULL)");
             s.execute("CREATE TABLE IF NOT EXISTS progression_claims(uuid TEXT NOT NULL REFERENCES profiles(uuid), claim_key TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(uuid,claim_key))");
             s.execute("CREATE TABLE IF NOT EXISTS placed_blocks(world TEXT NOT NULL,x INTEGER NOT NULL,y INTEGER NOT NULL,z INTEGER NOT NULL,uuid TEXT NOT NULL,material TEXT NOT NULL,PRIMARY KEY(world,x,y,z))");
             s.execute("CREATE TABLE IF NOT EXISTS daily_quest_progress(uuid TEXT NOT NULL REFERENCES profiles(uuid),day_key TEXT NOT NULL,quest_id TEXT NOT NULL,progress INTEGER NOT NULL DEFAULT 0 CHECK(progress>=0),claimed INTEGER NOT NULL DEFAULT 0 CHECK(claimed IN (0,1)),PRIMARY KEY(uuid,day_key,quest_id))");
@@ -72,7 +76,7 @@ final class ProgressStore implements AutoCloseable {
         try (PreparedStatement p=connection.prepareStatement("INSERT INTO profiles(uuid,username,first_join,last_join,balance_minor) VALUES(?,?,?,?,?) ON CONFLICT(uuid) DO UPDATE SET username=excluded.username,last_join=excluded.last_join")) {
             p.setString(1,uuid.toString()); p.setString(2,name); p.setLong(3,now); p.setLong(4,now); p.setLong(5,startingBalanceMinor); p.executeUpdate();
         }
-        for (String skill: List.of("mining","farming","foraging","combat")) try(PreparedStatement p=connection.prepareStatement("INSERT OR IGNORE INTO skills(uuid,skill) VALUES(?,?)")){p.setString(1,uuid.toString());p.setString(2,skill);p.executeUpdate();}
+        for (String skill: List.of("mining","farming","foraging","combat","fishing","enchanting","alchemy")) try(PreparedStatement p=connection.prepareStatement("INSERT OR IGNORE INTO skills(uuid,skill) VALUES(?,?)")){p.setString(1,uuid.toString());p.setString(2,skill);p.executeUpdate();}
     }
     synchronized long balance(UUID id) throws SQLException { try(PreparedStatement p=connection.prepareStatement("SELECT balance_minor FROM profiles WHERE uuid=?")){p.setString(1,id.toString());try(ResultSet r=p.executeQuery()){return r.next()?r.getLong(1):0;}} }
     synchronized long xp(UUID id,String skill) throws SQLException { try(PreparedStatement p=connection.prepareStatement("SELECT xp FROM skills WHERE uuid=? AND skill=?")){p.setString(1,id.toString());p.setString(2,skill);try(ResultSet r=p.executeQuery()){return r.next()?r.getLong(1):0;}} }
@@ -87,7 +91,7 @@ final class ProgressStore implements AutoCloseable {
         if(amountMinor<0) return false; connection.setAutoCommit(false);
         try { try(PreparedStatement p=connection.prepareStatement("UPDATE profiles SET balance_minor=balance_minor-? WHERE uuid=? AND balance_minor>=?")){p.setLong(1,amountMinor);p.setString(2,id.toString());p.setLong(3,amountMinor);if(p.executeUpdate()!=1){connection.rollback();return false;}}
             ledger(id,-amountMinor,reason);connection.commit();return true;
-        } catch(SQLException e){connection.rollback();throw e;} finally{connection.setAutoCommit(true);}
+        } catch(SQLException|RuntimeException e){connection.rollback();throw e;} finally{connection.setAutoCommit(true);}
     }
     synchronized long chargeDeathHalf(UUID id)throws SQLException{
         connection.setAutoCommit(false);
@@ -96,19 +100,19 @@ final class ProgressStore implements AutoCloseable {
             long loss=balance/2;
             if(loss>0){try(PreparedStatement p=connection.prepareStatement("UPDATE profiles SET balance_minor=balance_minor-? WHERE uuid=? AND balance_minor>=?")){p.setLong(1,loss);p.setString(2,id.toString());p.setLong(3,loss);if(p.executeUpdate()!=1)throw new SQLException("Death purse update failed");}ledger(id,-loss,"Death purse loss (50%)");}
             connection.commit();return loss;
-        }catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        }catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
     }
     synchronized boolean deposit(UUID id,long amountMinor,String reason) throws SQLException {
         if(amountMinor<0)return false;connection.setAutoCommit(false);
         try{try(PreparedStatement p=connection.prepareStatement("UPDATE profiles SET balance_minor=balance_minor+?,total_earned_minor=total_earned_minor+? WHERE uuid=? AND balance_minor<=? AND total_earned_minor<=?")){p.setLong(1,amountMinor);p.setLong(2,amountMinor);p.setString(3,id.toString());p.setLong(4,Long.MAX_VALUE-amountMinor);p.setLong(5,Long.MAX_VALUE-amountMinor);if(p.executeUpdate()!=1){connection.rollback();return false;}}
             ledger(id,amountMinor,reason);connection.commit();return true;
-        }catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        }catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
     }
     private void ledger(UUID id,long delta,String reason)throws SQLException{try(PreparedStatement p=connection.prepareStatement("INSERT INTO economy_ledger(id,uuid,delta_minor,reason,created_at) VALUES(?,?,?,?,?)")){p.setString(1,UUID.randomUUID().toString());p.setString(2,id.toString());p.setLong(3,delta);p.setString(4,reason);p.setLong(5,System.currentTimeMillis());p.executeUpdate();}}
     synchronized void addProgress(UUID id,String skill,String item,long xp,long amount)throws SQLException {
         connection.setAutoCommit(false);try{if(xp>0)try(PreparedStatement p=connection.prepareStatement("INSERT INTO skills(uuid,skill,xp) VALUES(?,?,?) ON CONFLICT(uuid,skill) DO UPDATE SET xp=xp+excluded.xp WHERE xp<=?")){p.setString(1,id.toString());p.setString(2,skill);p.setLong(3,xp);p.setLong(4,Long.MAX_VALUE-xp);p.executeUpdate();}
             if(item!=null&&amount>0)try(PreparedStatement p=connection.prepareStatement("INSERT INTO collections(uuid,item,amount) VALUES(?,?,?) ON CONFLICT(uuid,item) DO UPDATE SET amount=amount+excluded.amount WHERE amount<=?")){p.setString(1,id.toString());p.setString(2,item);p.setLong(3,amount);p.setLong(4,Long.MAX_VALUE-amount);p.executeUpdate();}connection.commit();
-        }catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        }catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
     }
 
     synchronized GatherResult recordGather(UUID id,String skill,String item,long xp,long amount,
@@ -147,7 +151,7 @@ final class ProgressStore implements AutoCloseable {
         return true;
     }
     synchronized boolean claimAchievement(UUID id,String key,long xp)throws SQLException {
-        connection.setAutoCommit(false);try{boolean claimed=claimAndAward(id,"achievement:"+key,xp);connection.commit();return claimed;}catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        connection.setAutoCommit(false);try{boolean claimed=claimAndAward(id,"achievement:"+key,xp);connection.commit();return claimed;}catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
     }
     synchronized List<DailyTask> dailyTasks(UUID id,String day)throws SQLException{
         List<DailyTask> tasks=new ArrayList<>();try(PreparedStatement p=connection.prepareStatement("SELECT quest_id,progress,claimed FROM daily_quest_progress WHERE uuid=? AND day_key=? ORDER BY quest_id")){p.setString(1,id.toString());p.setString(2,day);try(ResultSet r=p.executeQuery()){while(r.next())tasks.add(new DailyTask(r.getString(1),r.getLong(2),r.getInt(3)!=0));}}return tasks;
@@ -160,7 +164,7 @@ final class ProgressStore implements AutoCloseable {
             if(coinMinor>0){try(PreparedStatement p=connection.prepareStatement("UPDATE profiles SET balance_minor=balance_minor+?,total_earned_minor=total_earned_minor+? WHERE uuid=? AND balance_minor<=? AND total_earned_minor<=?")){p.setLong(1,coinMinor);p.setLong(2,coinMinor);p.setString(3,id.toString());p.setLong(4,Long.MAX_VALUE-coinMinor);p.setLong(5,Long.MAX_VALUE-coinMinor);if(p.executeUpdate()!=1)throw new SQLException("Coin balance limit reached");}ledger(id,coinMinor,"Daily quest "+quest);}
             if(!claimAndAward(id,"daily:"+day+":"+quest,xp))throw new SQLException("Daily XP claim already exists");
             connection.commit();return true;
-        }catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        }catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
     }
     synchronized void markPlacedBlock(String world,int x,int y,int z,UUID owner,String material)throws SQLException{
         try(PreparedStatement p=connection.prepareStatement("INSERT OR REPLACE INTO placed_blocks(world,x,y,z,uuid,material) VALUES(?,?,?,?,?,?)")){p.setString(1,world);p.setInt(2,x);p.setInt(3,y);p.setInt(4,z);p.setString(5,owner.toString());p.setString(6,material);p.executeUpdate();}
@@ -171,16 +175,29 @@ final class ProgressStore implements AutoCloseable {
 
     synchronized MinionRow createMinion(String id, UUID owner, String islandId, String world,
                                         int x, int y, int z, String type, long now) throws SQLException {
-        connection.setAutoCommit(false);try (PreparedStatement p=connection.prepareStatement("INSERT INTO minions(id,owner_uuid,island_id,world,x,y,z,type,tier,storage,last_action) VALUES(?,?,?,?,?,?,?, ?,1,0,?)")) {
+        return createMinion(id, owner, islandId, world, x, y, z, type, 1, now);
+    }
+    synchronized MinionRow createMinion(String id, UUID owner, String islandId, String world,
+                                        int x, int y, int z, String type, int tier, long now) throws SQLException {
+        if (tier < 1 || tier > 11 || now < 0) throw new IllegalArgumentException("Invalid portable minion state");
+        connection.setAutoCommit(false);try (PreparedStatement p=connection.prepareStatement("INSERT INTO minions(id,owner_uuid,island_id,world,x,y,z,type,tier,storage,last_action) VALUES(?,?,?,?,?,?,?,?,?,0,?)")) {
             p.setString(1,id); p.setString(2,owner.toString()); p.setString(3,islandId); p.setString(4,world);
-            p.setInt(5,x); p.setInt(6,y); p.setInt(7,z); p.setString(8,type); p.setLong(9,now); p.executeUpdate();
+            p.setInt(5,x); p.setInt(6,y); p.setInt(7,z); p.setString(8,type); p.setInt(9,tier); p.setLong(10,now); p.executeUpdate();
             connection.commit();
-        }catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        }catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
         return minion(id);
     }
     synchronized boolean awardMinionType(UUID owner,String type)throws SQLException{
         connection.setAutoCommit(false);try{boolean awarded=claimAndAward(owner,"minion:type:"+type,25);connection.commit();return awarded;}
-        catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+    }
+    synchronized long bankBalance(UUID id) throws SQLException {
+        try (Statement s = connection.createStatement(); ResultSet r = s.executeQuery("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bank_accounts'")) {
+            if (!r.next()) return 0;
+        }
+        try (PreparedStatement p = connection.prepareStatement("SELECT balance_minor FROM bank_accounts WHERE profile_uuid=?")) {
+            p.setString(1, id.toString()); try (ResultSet r = p.executeQuery()) { return r.next() ? r.getLong(1) : 0; }
+        }
     }
     synchronized MinionRow minion(String id) throws SQLException {
         try (PreparedStatement p=connection.prepareStatement("SELECT id,owner_uuid,island_id,world,x,y,z,type,tier,storage,last_action FROM minions WHERE id=?")) {
@@ -223,21 +240,24 @@ final class ProgressStore implements AutoCloseable {
             }
             connection.commit();
             return new MinionRow(old.id(),old.owner(),old.islandId(),old.world(),old.x(),old.y(),old.z(),old.type(),old.tier(),a.storage(),a.lastAction());
-        } catch(SQLException e){connection.rollback();throw e;} finally{connection.setAutoCommit(true);}
+        } catch(SQLException|RuntimeException e){connection.rollback();throw e;} finally{connection.setAutoCommit(true);}
     }
     synchronized int takeMinionStorage(String id, UUID owner, int requested) throws SQLException {
+        return takeMinionStorage(id,owner,requested,UUID.randomUUID().toString());
+    }
+    synchronized int takeMinionStorage(String id, UUID owner, int requested, String operation) throws SQLException {
         if(requested<=0)return 0;
         connection.setAutoCommit(false);
         try {
             int count;
             try(PreparedStatement p=connection.prepareStatement("SELECT storage FROM minions WHERE id=? AND owner_uuid=?")) {
-                p.setString(1,id);p.setString(2,owner.toString());try(ResultSet r=p.executeQuery()){if(!r.next()){connection.rollback();return 0;}count=Math.min(requested,r.getInt(1));}
+                p.setString(1,id);p.setString(2,owner.toString());try(ResultSet r=p.executeQuery()){if(!r.next()){connection.rollback();return 0;}if(r.getInt(1)<requested){connection.rollback();return 0;}count=requested;}
             }
             try(PreparedStatement p=connection.prepareStatement("UPDATE minions SET storage=storage-? WHERE id=? AND owner_uuid=? AND storage>=?")) {
                 p.setInt(1,count);p.setString(2,id);p.setString(3,owner.toString());p.setInt(4,count);if(p.executeUpdate()!=1){connection.rollback();return 0;}
             }
-            connection.commit();return count;
-        } catch(SQLException e){connection.rollback();throw e;} finally{connection.setAutoCommit(true);}
+            minionReceipt(operation,owner,id,count);connection.commit();return count;
+        } catch(SQLException|RuntimeException e){connection.rollback();throw e;} finally{connection.setAutoCommit(true);}
     }
     synchronized void returnMinionStorage(String id,int amount,int capacity) throws SQLException {
         if(amount<=0)return;
@@ -255,11 +275,25 @@ final class ProgressStore implements AutoCloseable {
                 p.setString(1,id);p.setString(2,owner.toString());if(p.executeUpdate()!=1){connection.rollback();return false;}
             }
             ledger(owner,-cost,"Minion upgrade "+id);claimAndAward(owner,"minion:tier:"+rowTier(id),25);connection.commit();return true;
-        }catch(SQLException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+        }catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
     }
     synchronized boolean deleteMinion(String id,UUID owner)throws SQLException {
         try(PreparedStatement p=connection.prepareStatement("DELETE FROM minions WHERE id=? AND owner_uuid=?")) {
             p.setString(1,id);p.setString(2,owner.toString());return p.executeUpdate()==1;
+        }
+    }
+    synchronized boolean pickupMinion(String id,UUID owner,String operation)throws SQLException {
+        connection.setAutoCommit(false);
+        try {
+            try(var p=connection.prepareStatement("DELETE FROM minions WHERE id=? AND owner_uuid=? AND storage=0")){
+                p.setString(1,id);p.setString(2,owner.toString());if(p.executeUpdate()!=1){connection.rollback();return false;}
+            }
+            minionReceipt(operation,owner,id,0);connection.commit();return true;
+        }catch(SQLException|RuntimeException e){connection.rollback();throw e;}finally{connection.setAutoCommit(true);}
+    }
+    private void minionReceipt(String operation,UUID owner,String minion,int quantity)throws SQLException {
+        try(var p=connection.prepareStatement("INSERT INTO minion_inventory_receipts(operation_key,owner_uuid,minion_id,quantity,created_at) VALUES(?,?,?,?,?)")) {
+            p.setString(1,operation);p.setString(2,owner.toString());p.setString(3,minion);p.setInt(4,quantity);p.setLong(5,System.currentTimeMillis());p.executeUpdate();
         }
     }
     private MinionRow row(ResultSet r)throws SQLException {

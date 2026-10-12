@@ -332,9 +332,14 @@ public final class MarketplaceDatabase {
         migrate(connection, 2, "/db/migration/V2__bank.sql");
         migrate(connection, 3, "/db/migration/V3__market_maker.sql");
         migrate(connection, 4, "/db/migration/V4__item_instance_reservations.sql");
+        migrate(connection, 5, "/db/migration/V5__asset_identity.sql");
+        migrate(connection, 6, "/db/migration/V6__standardized_replay_and_resale.sql");
     }
 
     private void migrate(Connection connection, int version, String resource) throws SQLException {
+        if(tableExists(connection,"market_schema_version"))try(var q=connection.prepareStatement("SELECT 1 FROM market_schema_version WHERE version=?")) {
+            q.setInt(1,version);try(var r=q.executeQuery()){if(r.next())return;}
+        }
         String sql;
         try (InputStream stream = getClass().getResourceAsStream(resource)) {
             if (stream == null) throw new SQLException("Missing database migration " + resource);

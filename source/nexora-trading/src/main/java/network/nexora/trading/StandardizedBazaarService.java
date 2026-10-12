@@ -26,13 +26,13 @@ public final class StandardizedBazaarService {
     public StandardizedBazaarService(MarketplaceDatabase database) { this.database = Objects.requireNonNull(database); }
 
     public Result sell(UUID owner, String product, long price, List<StandardItem> items, String operation, long now) throws SQLException {
-        if (items == null || items.isEmpty() || price <= 0 || !valid(product, operation)) throw new IllegalArgumentException("Invalid standardized sell offer");
+        if (items == null || items.isEmpty() || items.size()>10_000 || price <= 0 || !valid(product, operation)) throw new IllegalArgumentException("Invalid standardized sell offer");
         if (items.stream().map(StandardItem::instanceId).distinct().count() != items.size()) throw new IllegalArgumentException("Repeated item instance");
         return place(owner, product, OrderSide.SELL, price, items.size(), items, operation, false, now);
     }
 
     public Result sellInstant(UUID owner, String product, long price, List<StandardItem> items, String operation, long now) throws SQLException {
-        if (items == null || items.isEmpty() || price <= 0 || !valid(product, operation)) throw new IllegalArgumentException("Invalid standardized instant sell");
+        if (items == null || items.isEmpty() || items.size()>10_000 || price <= 0 || !valid(product, operation)) throw new IllegalArgumentException("Invalid standardized instant sell");
         return place(owner, product, OrderSide.SELL, price, items.size(), items, operation, true, now);
     }
 
@@ -49,7 +49,24 @@ public final class StandardizedBazaarService {
     private Result place(UUID owner, String product, OrderSide side, long price, long quantity,
                          List<StandardItem> items, String operation, boolean requireFull, long now) throws SQLException {
         UUID id = UUID.randomUUID();
-        try { return database.transact(c -> placeTx(c, owner, product, side, price, quantity, items, id, operation, requireFull, now)); }
+        StringBuilder request=new StringBuilder(owner+"|"+product+"|"+side+"|"+price+"|"+quantity+"|"+requireFull);
+        for(var item:items)request.append("|").append(item.instanceId()).append(":").append(sha256(item.snapshot()));
+        String hash=sha256(request.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        try { return database.transact(c -> {
+            try(var q=c.prepareStatement("SELECT owner_uuid,request_hash,order_id,outcome,filled,remaining FROM standardized_bazaar_transactions WHERE operation_key=?")) {
+                q.setString(1,operation);try(var r=q.executeQuery()) {
+                    if(r.next()) {
+                        if(!owner.toString().equals(r.getString(1))||!hash.equals(r.getString(2)))throw new IllegalArgumentException("Operation key reused for a different request");
+                        return new Result(Outcome.valueOf(r.getString(4)),UUID.fromString(r.getString(3)),r.getLong(5),r.getLong(6));
+                    }
+                }
+            }
+            Result result=placeTx(c, owner, product, side, price, quantity, items, id, operation, requireFull, now);
+            try(var insert=c.prepareStatement("INSERT INTO standardized_bazaar_transactions(operation_key,owner_uuid,request_hash,order_id,outcome,filled,remaining,created_at) VALUES(?,?,?,?,?,?,?,?)")) {
+                insert.setString(1,operation);insert.setString(2,owner.toString());insert.setString(3,hash);insert.setString(4,result.orderId().toString());insert.setString(5,result.outcome().name());insert.setLong(6,result.filled());insert.setLong(7,result.remaining());insert.setLong(8,now);insert.executeUpdate();
+            }
+            return result;
+        }); }
         catch (Rejected rejected) { return new Result(rejected.outcome, null, 0, 0); }
     }
 

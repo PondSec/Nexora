@@ -26,6 +26,9 @@ final class SidebarService implements Listener {
     private final ProgressStore store;
     private final Map<UUID, Sidebar> sidebars = new HashMap<>();
     private int taskId = -1;
+    private final Set<UUID> pending = new HashSet<>();
+    private final Map<UUID, Snapshot> snapshots = new HashMap<>();
+    private record Snapshot(long skyXp, long purse, long bank, int minions) {}
 
     SidebarService(NexoraCore plugin, ProgressStore store) { this.plugin = plugin; this.store = store; }
 
@@ -42,14 +45,14 @@ final class SidebarService implements Listener {
             Sidebar sidebar = sidebars.get(player.getUniqueId());
             if (sidebar != null && player.getScoreboard() == sidebar.board) player.setScoreboard(Bukkit.getScoreboardManager().getMainScoreboard());
         }
-        sidebars.clear();
+        sidebars.clear(); pending.clear(); snapshots.clear();
     }
 
     @EventHandler public void onJoin(PlayerJoinEvent event) {
         plugin.getServer().getScheduler().runTask(plugin, () -> update(event.getPlayer()));
     }
     @EventHandler public void onWorldChange(PlayerChangedWorldEvent event) { update(event.getPlayer()); }
-    @EventHandler public void onQuit(PlayerQuitEvent event) { sidebars.remove(event.getPlayer().getUniqueId()); }
+    @EventHandler public void onQuit(PlayerQuitEvent event) { sidebars.remove(event.getPlayer().getUniqueId()); snapshots.remove(event.getPlayer().getUniqueId()); }
 
     private void refreshAll() { for (Player player : Bukkit.getOnlinePlayers()) update(player); }
     void refresh(Player player) { update(player); }
@@ -69,11 +72,11 @@ final class SidebarService implements Listener {
             Objective objective = board.registerNewObjective("nexora", "dummy", "§6§lNEXORA SKYBLOCK");
             objective.setDisplaySlot(DisplaySlot.SIDEBAR);
             List<String> entries = new ArrayList<>(); List<Team> teams = new ArrayList<>();
-            for (int i = 0; i < 11; i++) {
+            for (int i = 0; i < 12; i++) {
                 String entry = "§" + Integer.toHexString(i) + "§r";
                 Team team = board.registerNewTeam("nx" + i);
                 team.addEntry(entry); entries.add(entry); teams.add(team);
-                objective.getScore(entry).setScore(11 - i);
+                objective.getScore(entry).setScore(12 - i);
             }
             state = new Sidebar(board, teams, entries, false); sidebars.put(player.getUniqueId(), state);
             player.setScoreboard(board);
@@ -83,11 +86,33 @@ final class SidebarService implements Listener {
             plugin.getLogger().warning("A different plugin replaced " + player.getName() + "'s Nexora sidebar; respecting that scoreboard.");
             return;
         }
+        UUID profileId = player.getUniqueId();
+        if (pending.add(profileId)) {
+            plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+                Snapshot loaded = null; Exception error = null;
+                try { loaded = new Snapshot(store.skyblockXp(profileId), store.balance(profileId), store.bankBalance(profileId), store.countMinionsForOwner(profileId)); }
+                catch (Exception ex) { error = ex; }
+                Snapshot result = loaded; Exception failure = error;
+                if (!plugin.isEnabled()) return;
+                plugin.getServer().getScheduler().runTask(plugin, () -> {
+                    pending.remove(profileId);
+                    if (failure != null) { plugin.getLogger().warning("Sidebar snapshot failed: " + failure.getMessage()); return; }
+                    if (player.isOnline() && Bukkit.getPlayer(profileId) == player) { snapshots.put(profileId, result); render(player); }
+                });
+            });
+        }
+        render(player);
+    }
+
+    private void render(Player player) {
+        Sidebar state = sidebars.get(player.getUniqueId());
+        Snapshot snapshot = snapshots.get(player.getUniqueId());
+        if (state == null || state.skipped || snapshot == null) return;
         try {
-            long skyXp = store.skyblockXp(player.getUniqueId());
+            long skyXp = snapshot.skyXp();
             ProgressionMath.LevelProgress level = ProgressionMath.sky(skyXp, plugin.skyCurve());
-            long purse = store.balance(player.getUniqueId());
-            int minions = store.countMinionsForOwner(player.getUniqueId());
+            long purse = snapshot.purse();
+            int minions = snapshot.minions();
             int slots = plugin.unlockedMinionSlots(level.level());
             List<String> lines = List.of(
                     "§6§lNEXORA SKYBLOCK",
@@ -98,6 +123,7 @@ final class SidebarService implements Listener {
                     "§r",
                     "§4Location: §f" + shortText(location(player.getWorld()), 15),
                     "§6Purse: §f" + String.format(Locale.US, "%,d.%02d", purse / 100, Math.abs(purse % 100)) + " Coins",
+                    "§6Bank: §f" + String.format(Locale.US, "%,d.%02d", snapshot.bank() / 100, snapshot.bank() % 100) + " Coins",
                     "§4Minions: §f" + minions + "/" + slots,
                     "§fOnline: §e" + Bukkit.getOnlinePlayers().size(),
                     "§8nexora.pondsec.com"
@@ -128,7 +154,7 @@ final class SidebarService implements Listener {
 
     private static final class Sidebar {
         private final Scoreboard board; private final List<Team> teams; private final List<String> entries;
-        private final List<String> lastLines = new ArrayList<>(Collections.nCopies(11, "")); private final boolean skipped;
+        private final List<String> lastLines = new ArrayList<>(Collections.nCopies(12, "")); private final boolean skipped;
         private Sidebar(Scoreboard board, List<Team> teams, List<String> entries, boolean skipped) { this.board=board;this.teams=teams;this.entries=entries;this.skipped=skipped; }
         private static Sidebar skipped() { return new Sidebar(null,List.of(),List.of(),true); }
     }

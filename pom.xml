@@ -1,0 +1,6 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>network.nexora</groupId><artifactId>nexora-network</artifactId><version>0.1.0</version><packaging>pom</packaging>
+  <modules><module>source/nexora-core</module><module>source/nexora-progression</module><module>source/nexora-trading</module><module>source/nexora-farm</module></modules>
+  <properties><nexora.build.root>${user.home}/.cache/nexora-build</nexora.build.root><maven.compiler.release>21</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding><project.build.outputTimestamp>2026-10-12T00:00:00Z</project.build.outputTimestamp></properties>
+<build><directory>${nexora.build.root}/${project.artifactId}</directory></build><profiles><profile><id>paper-smoke</id><modules><module>tests/paper-smoke</module></modules></profile></profiles></project>

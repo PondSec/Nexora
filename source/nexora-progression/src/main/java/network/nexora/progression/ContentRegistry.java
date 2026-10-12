@@ -14,6 +14,12 @@ public final class ContentRegistry {
             throw new IllegalArgumentException("Effect handler is blank or duplicated: " + handlerId);
     }
     public void registerItem(ItemDefinition item) { unique(items, item.id(), item); }
+    public void updateProperties(String itemId, ItemProperties properties) {
+        ItemDefinition item = items.get(itemId);
+        if (item == null) throw new IllegalArgumentException("Unknown item " + itemId);
+        items.put(itemId, new ItemDefinition(item.id(), item.materialKey(), item.rarity(), item.description(),
+                item.effectHandler(), item.tradingClassification(), properties));
+    }
     public void registerCollection(CollectionDefinition collection) { unique(collections, collection.id(), collection); }
     public void registerCollectionReward(String collectionId, int tier, CollectionReward reward) {
         CollectionDefinition collection = collections.get(collectionId);

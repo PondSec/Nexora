@@ -1,0 +1,48 @@
+{
+  "checks": [
+    "separate inventories survive reconnect",
+    "other profile collection remains locked",
+    "locked recipe has no enabled craft action",
+    "nexora:compress_coal unlocked",
+    "real craft button nexora:compress_coal",
+    "exact 160 ingredient consumption and canonical output",
+    "seller has no duplicate after fill",
+    "claim replay does not duplicate item",
+    "buying materials does not unlock collection",
+    "nexora:minion_coal unlocked",
+    "real craft button nexora:minion_coal",
+    "functional minion recipe consumes eight coal and chassis"
+  ],
+  "messages": {
+    "NexoraTestA": [
+      "NEXORA NETWORK",
+      "Build your island. Create your empire.",
+      "Use /island create to begin.",
+      "NexoraTestA joined the game",
+      "NexoraTestB joined the game",
+      "[NEXORA] Mining reached level 7",
+      "NXSMOKE_SEEDED",
+      "NexoraTestA joined the game",
+      "NexoraTestB joined the game",
+      "NEXORA RECIPE UNLOCKS",
+      "Unlocked: Enchanted Coal Recipe",
+      "Unlocked: Minion Coal Recipe",
+      "Open /recipebook to craft your unlocked recipes.",
+      "Crafted 1 × Enchanted Coal.",
+      "Order accepted · 0 filled, 1 remaining.",
+      "Crafted 1 × Minion Coal."
+    ],
+    "NexoraTestB": [
+      "NEXORA NETWORK",
+      "Build your island. Create your empire.",
+      "Use /island create to begin.",
+      "NexoraTestB joined the game",
+      "NXSMOKE_SEEDED",
+      "NexoraTestB joined the game",
+      "Order accepted · 1 filled, 0 remaining.",
+      "Claimed 1 × Paper."
+    ]
+  },
+  "passed": false,
+  "error": "AssertionError [ERR_ASSERTION]: missing materials disable repeat crafting\n    at verify (/Users/pond/Documents/ChatGPT/nexora/tests/client/progression.cjs:7:39)\n    at main (/Users/pond/Documents/ChatGPT/nexora/tests/client/progression.cjs:71:5)"
+}

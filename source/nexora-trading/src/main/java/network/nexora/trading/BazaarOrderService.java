@@ -25,12 +25,12 @@ public final class BazaarOrderService {
         if (productId == null || productId.isBlank() || materialKey == null || materialKey.isBlank())
             throw new IllegalArgumentException("Invalid product registration");
         try (Connection connection = database.openConnection(); var statement = connection.prepareStatement(
-                "INSERT OR IGNORE INTO bazaar_products(product_id,material_key,created_at) VALUES(?,?,?)")) {
+                "INSERT OR IGNORE INTO bazaar_products(product_id,asset_key,created_at) VALUES(?,?,?)")) {
             statement.setString(1, productId); statement.setString(2, materialKey); statement.setLong(3, now);
             statement.executeUpdate();
         }
         try (Connection connection = database.openConnection(); var query = connection.prepareStatement(
-                "SELECT material_key,enabled FROM bazaar_products WHERE product_id=?")) {
+                "SELECT asset_key,enabled FROM bazaar_products WHERE product_id=?")) {
             query.setString(1, productId);
             try (var row = query.executeQuery()) { return row.next() && materialKey.equals(row.getString(1)) && row.getInt(2) == 1; }
         }
@@ -222,6 +222,26 @@ public final class BazaarOrderService {
                 return List.copyOf(result);
             }
         }
+    }
+
+    /** Split a large durable claim into a deliverable portion; both remain owner-scoped. */
+    public ItemClaim claimPortion(UUID owner,String claimId,long requested,long now)throws SQLException {
+        if(requested<1||requested>64)throw new IllegalArgumentException("Invalid claim portion");
+        return database.transact(c->{
+            String product;long quantity;
+            try(var q=c.prepareStatement("SELECT product_id,quantity FROM bazaar_claimables WHERE claim_id=? AND profile_uuid=? AND asset_type='ITEMS' AND claimed_at IS NULL")) {
+                q.setString(1,claimId);q.setString(2,owner.toString());try(var r=q.executeQuery()){if(!r.next())return null;product=r.getString(1);quantity=r.getLong(2);}
+            }
+            if(quantity<=requested)return new ItemClaim(claimId,product,quantity);
+            String child=UUID.randomUUID().toString();
+            try(var u=c.prepareStatement("UPDATE bazaar_claimables SET quantity=quantity-? WHERE claim_id=? AND quantity>=? AND claimed_at IS NULL")){
+                u.setLong(1,requested);u.setString(2,claimId);u.setLong(3,requested);if(u.executeUpdate()!=1)throw new SQLException("Claim changed during split");
+            }
+            try(var insert=c.prepareStatement("INSERT INTO bazaar_claimables(claim_id,profile_uuid,asset_type,product_id,amount_minor,quantity,source_transaction_id,created_at) VALUES(?,?,'ITEMS',?,0,?,?,?)")){
+                insert.setString(1,child);insert.setString(2,owner.toString());insert.setString(3,product);insert.setLong(4,requested);insert.setString(5,"split:"+child);insert.setLong(6,now);insert.executeUpdate();
+            }
+            return new ItemClaim(child,product,requested);
+        });
     }
 
     public void markClaimed(UUID owner, String claimId, long now) throws SQLException {

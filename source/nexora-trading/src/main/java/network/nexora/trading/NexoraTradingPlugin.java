@@ -47,6 +47,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Paper entry point. Core owns the profile UUID and purse; this module adds bank/market tables. */
 public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     private MarketplaceDatabase database;
+    private network.nexora.core.NexoraCore core;
+    private network.nexora.core.api.CustomItemCatalog itemCatalog;
     private BazaarOrderService bazaar;
     private StandardizedBazaarService standardizedBazaar;
     private AuctionHouseService auctionHouse;
@@ -69,8 +71,9 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
         actionKey = new NamespacedKey(this, "trading_action");
         claimKey = new NamespacedKey(this, "market_claim_id");
         temporarySignKey = new NamespacedKey(this, "temporary_price_sign");
-        var core = Bukkit.getPluginManager().getPlugin("NexoraCore");
-        if (core == null || !core.isEnabled()) {
+        core = (network.nexora.core.NexoraCore)Bukkit.getPluginManager().getPlugin("NexoraCore");
+        itemCatalog=Bukkit.getServicesManager().load(network.nexora.core.api.CustomItemCatalog.class);
+        if (core == null || !core.isEnabled() || itemCatalog == null) {
             getLogger().severe("NexoraCore is not enabled; wallet integration is disabled.");
             Bukkit.getPluginManager().disablePlugin(this);
             return;
@@ -168,6 +171,14 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                 npcLiquidity.configure(policy, now);
                 products.put(id, new MarketProduct(id, material, yaml.getString(base + "category", "Resources"), policy));
             }
+            for(var item:itemCatalog.entries().values().stream().sorted(java.util.Comparator.comparing(network.nexora.core.api.CustomItemCatalog.Entry::id)).toList()) {
+                if(!item.id().startsWith("nexora:") || !item.bazaar() || item.maxStack()<=1 || !item.stats().isEmpty() || item.ability()!=null)continue;
+                Material material=Material.matchMaterial(item.material());
+                if(!bazaar.registerProduct(item.id(),item.id(),now))throw new IllegalStateException("Registry product identity conflict: "+item.id());
+                var disabledNpc=new NpcLiquidityService.Policy("bazaar_master",item.id(),Math.max(1,item.npcValueMinor()),1000,0,0,0,0,0,0);
+                npcLiquidity.configure(disabledNpc,now);
+                products.put(item.id(),new MarketProduct(item.id(),material,"Enchanted & Components",disabledNpc));
+            }
             products.put("nexora:infinite_rocket", new MarketProduct("nexora:infinite_rocket", Material.FIREWORK_ROCKET,
                     "Mythic Utilities", null, true));
             return !products.isEmpty();
@@ -176,83 +187,33 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
 
     private void handleBazaarCommand(org.bukkit.entity.Player player, String[] args) {
         try {
-            if (args.length == 0 || args[0].equalsIgnoreCase("open")) { openBazaar(player); return; }
-            if (args[0].equalsIgnoreCase("orders")) {
-                var orders = bazaar.myOrders(player.getUniqueId(), 54);
-                if (orders.isEmpty()) player.sendMessage("§7You have no Bazaar orders.");
-                for (var order : orders) player.sendMessage("§e" + order.orderId() + " §7" + order.side() + " " + order.productId()
-                        + " ×" + order.remaining() + " @ " + coins(order.unitPriceMinor()) + " §8" + order.status()
-                        + (order.status().equals("OPEN") || order.status().equals("PARTIAL") ? " §7use /bazaar cancel " + order.orderId() : ""));
-                return;
+            if(args.length==0 || args[0].equalsIgnoreCase("open")){openBazaar(player);return;}
+            if(args[0].equalsIgnoreCase("orders")){openMyBazaarOrders(player);return;}
+            if(args[0].equalsIgnoreCase("cancel") && args.length==2){
+                var result=bazaar.cancel(player.getUniqueId(),UUID.fromString(args[1]),UUID.randomUUID().toString(),System.currentTimeMillis());
+                player.sendMessage("§e"+result.message());deliverBazaarClaims(player);return;
             }
-            if (args[0].equalsIgnoreCase("cancel")) {
-                if (args.length != 2) { player.sendMessage("§cUsage: /bazaar cancel <order-uuid>"); return; }
-                var result = bazaar.cancel(player.getUniqueId(), UUID.fromString(args[1]), UUID.randomUUID().toString(), System.currentTimeMillis());
-                player.sendMessage("§e" + result.message()); deliverBazaarClaims(player); return;
+            if(args.length==4 && Set.of("buy","sell","instantbuy","instantsell").contains(args[0].toLowerCase(java.util.Locale.ROOT))){
+                MarketProduct product=products.get(args[1].toLowerCase(java.util.Locale.ROOT));
+                if(product==null){player.sendMessage("§cUnknown Bazaar product.");return;}
+                if(product.standardized){openStandardizedProduct(player,product,1);return;}
+                String action=args[0].toLowerCase(java.util.Locale.ROOT);
+                var result=submitCommodityOrder(player,product,action.endsWith("sell")?OrderSide.SELL:OrderSide.BUY,
+                        Long.parseLong(args[2]),parseCoins(args[3]),action.startsWith("instant"));
+                player.sendMessage("§e"+result.message()+" · "+result.filled()+" filled, "+result.remaining()+" remaining.");
+                deliverBazaarClaims(player);return;
             }
-            if (args[0].equalsIgnoreCase("buy") || args[0].equalsIgnoreCase("sell")
-                    || args[0].equalsIgnoreCase("instantbuy") || args[0].equalsIgnoreCase("instantsell")) {
-                if (args.length != 4) { player.sendMessage("§cUsage: /bazaar <buy|sell|instantbuy|instantsell> <product> <quantity> <coin-price>"); return; }
-                MarketProduct product = products.get(args[1].toLowerCase(java.util.Locale.ROOT));
-                if (product == null) { player.sendMessage("§cUnknown Bazaar product."); return; }
-                if (product.standardized) { player.sendMessage("§eInfinite Rockets are traded through the Bazaar GUI so their unique item instances stay protected."); openStandardizedProduct(player, product, 1); return; }
-                long quantity = Long.parseLong(args[2]); long price = parseCoins(args[3]);
-                if (quantity <= 0 || quantity > 1_000_000) { player.sendMessage("§cInvalid quantity."); return; }
-                boolean instant = args[0].toLowerCase(java.util.Locale.ROOT).startsWith("instant");
-                boolean isSell = args[0].toLowerCase(java.util.Locale.ROOT).endsWith("sell");
-                if (isSell) {
-                    ItemStack removed = removeMaterial(player, product.material, quantity);
-                    if (removed == null) { player.sendMessage("§cYou do not have that many items."); return; }
-                    player.saveData();
-                    long unplaced = quantity;
-                    try {
-                        if (!instant) {
-                            var quote = npcLiquidity.quote(product.policy, System.currentTimeMillis());
-                            long againstNpc = price <= quote.bidMinor() ? Math.min(unplaced, quote.bidQuantity()) : 0;
-                            if (againstNpc > 0 && npcLiquidity.sellToNpc(product.policy, player.getUniqueId(), againstNpc, price,
-                                    UUID.randomUUID().toString(), System.currentTimeMillis()) == NpcLiquidityService.Outcome.TRADED) {
-                                unplaced -= againstNpc;
-                                
-                                player.sendMessage("§aNPC bid filled " + againstNpc + " item(s).");
-                            }
-                        }
-                        if (unplaced > 0) {
-                            var result = bazaar.place(player.getUniqueId(), product.id, OrderSide.SELL, price, unplaced, instant,
-                                    UUID.randomUUID().toString(), System.currentTimeMillis());
-                            if (!accepted(result)) {
-                                restoreItem(player, new ItemStack(product.material, Math.toIntExact(unplaced)));
-                                unplaced = 0;
-                            } else unplaced = 0;
-                            player.sendMessage("§aPlayer sell order: " + result.outcome() + " · remaining " + result.remaining() + ".");
-                        }
-                    } catch (Exception ex) {
-                        if (unplaced > 0) restoreItem(player, new ItemStack(product.material, Math.toIntExact(unplaced)));
-                        throw ex;
-                    }
-                } else {
-                    long unplaced = quantity;
-                    if (!instant) {
-                        var quote = npcLiquidity.quote(product.policy, System.currentTimeMillis());
-                        long againstNpc = price >= quote.askMinor() ? Math.min(unplaced, quote.askQuantity()) : 0;
-                        if (againstNpc > 0 && npcLiquidity.buyFromNpc(product.policy, player.getUniqueId(), againstNpc, price,
-                                UUID.randomUUID().toString(), System.currentTimeMillis()) == NpcLiquidityService.Outcome.TRADED) {
-                            unplaced -= againstNpc;
-                            player.sendMessage("§aNPC ask filled " + againstNpc + " item(s).");
-                            deliverBazaarClaims(player);
-                        }
-                    }
-                    if (unplaced > 0) {
-                        var result = bazaar.place(player.getUniqueId(), product.id, OrderSide.BUY, price, unplaced, instant,
-                                UUID.randomUUID().toString(), System.currentTimeMillis());
-                        player.sendMessage("§aPlayer buy order: " + result.outcome() + " · filled " + result.filled() + ", remaining " + result.remaining() + ".");
-                    }
-                    deliverBazaarClaims(player);
-                }
-                return;
-            }
-            player.sendMessage("§eCommands: /bazaar · /bazaar <buy|sell|instantbuy|instantsell> <product> <quantity> <coin-price> · /bazaar orders · /bazaar cancel <id>");
-        } catch (NumberFormatException ex) { player.sendMessage("§cUse a valid quantity and Coin amount, such as 12.50."); }
-        catch (Exception ex) { getLogger().warning("Bazaar command failed: " + ex.getMessage()); player.sendMessage("§cBazaar transaction failed safely. Your order and balance were not changed."); }
+            player.sendMessage("§e/bazaar <buy|sell|instantbuy|instantsell> <product> <quantity> <coin-price> · /bazaar orders · /bazaar cancel <id>");
+        }catch(Exception error){getLogger().warning("Bazaar transaction failed: "+error.getMessage());player.sendMessage("§cTransaction could not complete. Saved inventory recovery has been applied.");}
+    }
+
+    private BazaarOrderService.PlaceResult submitCommodityOrder(org.bukkit.entity.Player player, MarketProduct product, OrderSide side, long quantity, long price, boolean instant) throws Exception {
+        if(quantity<1||quantity>1_000_000||price<1)throw new IllegalArgumentException("Invalid order quantity or price");
+        String operation=UUID.randomUUID().toString();
+        if(side==OrderSide.SELL && removeProduct(player,product,quantity,network.nexora.core.api.InventoryJournal.Domain.BAZAAR_PLACE,operation)==null)
+            throw new IllegalArgumentException("Not enough matching items");
+        try { return bazaar.place(player.getUniqueId(),product.id,side,price,quantity,instant,operation,System.currentTimeMillis()); }
+        finally { if(side==OrderSide.SELL)core.resolveInventoryOperation(player); }
     }
 
     private void openBazaar(org.bukkit.entity.Player player) {
@@ -335,7 +296,7 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                 inv.setItem(10 + i, button(selected ? Material.LIME_DYE : Material.GRAY_DYE,
                         (selected ? "§a▶ " : "§f") + "Quantity ×" + qty,
                         List.of("§7System buy total: §6" + coins(askTotal), "§7System sell net: §6" + coins(bidNet),
-                                "§7Select this quantity"), "bazaar-quantity:" + product.id + ":" + qty));
+                                "§7Select this quantity"), "bazaar-quantity:" + product.id.replace(":", "%3A") + ":" + qty));
             }
             int npcBuyAmount = Math.toIntExact(Math.min(selectedQuantity, quote.askQuantity()));
             int npcSellAmount = Math.toIntExact(Math.min(selectedQuantity, quote.bidQuantity()));
@@ -343,22 +304,22 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                     List.of("§7Price " + coins(quote.askMinor()) + " × " + selectedQuantity,
                             "§7Includes 1% trade fee", "§6Total: " + coins(buyTotal),
                             npcBuyAmount == selectedQuantity ? "§eClick to buy" : "§cOnly " + npcBuyAmount + " in System stock"),
-                    npcBuyAmount == selectedQuantity ? "bazaar-npc-buy:" + product.id + ":" + selectedQuantity : null));
+                    npcBuyAmount == selectedQuantity ? "bazaar-npc-buy:" + product.id.replace(":", "%3A") + ":" + selectedQuantity : null));
             inv.setItem(20, button(Material.EMERALD, "§bPlace Buy Order ×" + selectedQuantity,
                     List.of("§7Limit: " + coins(quote.askMinor()) + " each", "§7Escrow + order fee: §6" +
                             coins(Math.addExact(Math.multiplyExact(quote.askMinor(), selectedQuantity),
                                     BazaarAccounting.buyOrderCreationFee(quote.askMinor(), selectedQuantity))),
                             "§7Filled automatically against player sell orders"),
-                    "bazaar-order:" + product.id + ":BUY:" + selectedQuantity + ":" + quote.askMinor()));
+                    "bazaar-order:" + product.id.replace(":", "%3A") + ":BUY:" + selectedQuantity + ":" + quote.askMinor()));
             inv.setItem(24, button(Material.BARREL, "§ePlace Sell Offer ×" + selectedQuantity,
                     List.of("§7Limit: " + coins(quote.bidMinor()) + " each", "§7Estimated net after 1% fee: §6" + coins(sellNet),
                             "§7Filled automatically against player buy orders"),
-                    "bazaar-order:" + product.id + ":SELL:" + selectedQuantity + ":" + quote.bidMinor()));
+                    "bazaar-order:" + product.id.replace(":", "%3A") + ":SELL:" + selectedQuantity + ":" + quote.bidMinor()));
             inv.setItem(25, button(Material.RED_DYE, "§cSell to System ×" + selectedQuantity,
                     List.of("§7Bid " + coins(quote.bidMinor()) + " × " + selectedQuantity,
                             "§7Net after 1% fee: §6" + coins(sellNet),
                             npcSellAmount == selectedQuantity ? "§eClick to sell" : "§cSystem can buy " + npcSellAmount + ""),
-                    npcSellAmount == selectedQuantity ? "bazaar-npc-sell:" + product.id + ":" + selectedQuantity : null));
+                    npcSellAmount == selectedQuantity ? "bazaar-npc-sell:" + product.id.replace(":", "%3A") + ":" + selectedQuantity : null));
             inv.setItem(22, button(Material.ARROW, "§eBack", "bazaar:back"));
         } catch (SQLException ex) { player.sendMessage("§cCould not load market quote."); return; }
         player.openInventory(inv);
@@ -379,7 +340,7 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                 inv.setItem(10 + i, button(qty == selectedQuantity ? Material.LIME_DYE : Material.GRAY_DYE,
                         (qty == selectedQuantity ? "§a▶ " : "§f") + "Quantity ×" + qty,
                         List.of("§7Unique physical Rockets required for sell offers", "§eClick to select"),
-                        "bazaar-quantity:" + product.id + ":" + qty));
+                        "bazaar-quantity:" + product.id.replace(":", "%3A") + ":" + qty));
             }
             inv.setItem(19, button(Material.EMERALD, "§bCreate Buy Order", List.of("§7Enter a per-Rocket limit price", "§7Coins escrowed; matching is price-time priority", "§7Quantity: " + selectedQuantity), "bazaar-standard-price:BUY:" + selectedQuantity));
             inv.setItem(25, button(Material.BARREL, "§eCreate Sell Offer", List.of("§7Enter a per-Rocket limit price", "§7Requires " + selectedQuantity + " real Rockets", "§7Items are saved as unique escrow instances"), "bazaar-standard-price:SELL:" + selectedQuantity));
@@ -707,25 +668,25 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                 selected.add(stack.clone()); escrow.add(new StandardizedBazaarService.StandardItem(instance, stack.clone().serializeAsBytes()));
             }
             if (selected.size() != draft.quantity) { player.sendMessage("§cYou need " + draft.quantity + " unique Infinite Rockets in your inventory."); openStandardizedProduct(player, draft.product, draft.quantity); return; }
+            String operation=UUID.randomUUID().toString();
+            ItemStack[] after=player.getInventory().getContents();
+            for(int i=0;i<after.length;i++)after[i]=after[i]==null?null:after[i].clone();
+            Set<String> instances=selected.stream().map(this::rocketInstanceId).collect(java.util.stream.Collectors.toSet());
+            for(int slot=0;slot<player.getInventory().getStorageContents().length;slot++) {
+                if(after[slot]!=null && instances.contains(rocketInstanceId(after[slot])))after[slot]=null;
+            }
+            core.applyInventoryOperation(player,network.nexora.core.api.InventoryJournal.Domain.STANDARD_PLACE,operation,after);
             try {
                 var result = draft.instant
-                        ? standardizedBazaar.sellInstant(player.getUniqueId(), draft.product.id, draft.price, escrow, UUID.randomUUID().toString(), System.currentTimeMillis())
-                        : standardizedBazaar.sell(player.getUniqueId(), draft.product.id, draft.price, escrow, UUID.randomUUID().toString(), System.currentTimeMillis());
-                if (result.orderId() != null) {
-                    for (ItemStack target : selected) removeExactInstance(player, rocketInstanceId(target));
-                    player.saveData();
-                }
+                        ? standardizedBazaar.sellInstant(player.getUniqueId(), draft.product.id, draft.price, escrow, operation, System.currentTimeMillis())
+                        : standardizedBazaar.sell(player.getUniqueId(), draft.product.id, draft.price, escrow, operation, System.currentTimeMillis());
                 player.sendMessage("§eRocket sell offer: " + result.outcome() + " · " + result.filled() + " filled, " + result.remaining() + " open.");
-            } catch (Exception failure) { throw failure; }
+            } finally {core.resolveInventoryOperation(player);}
         }
         deliverStandardizedBazaarClaims(player); openStandardizedProduct(player, draft.product, draft.quantity);
     }
 
-    private boolean isInfiniteRocket(ItemStack stack) {
-        if (!stack.hasItemMeta()) return false;
-        NamespacedKey key = NamespacedKey.fromString("nexoraprogression:item_id");
-        return key != null && "nexora:infinite_rocket".equals(stack.getItemMeta().getPersistentDataContainer().get(key, PersistentDataType.STRING));
-    }
+    private boolean isInfiniteRocket(ItemStack stack) { return "nexora:infinite_rocket".equals(itemCatalog.identify(stack)); }
     private String rocketInstanceId(ItemStack stack) {
         if (!stack.hasItemMeta()) return null;
         NamespacedKey key = NamespacedKey.fromString("nexoraprogression:item_instance_id");
@@ -750,22 +711,10 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     }
 
     private void executeBazaarOrder(org.bukkit.entity.Player player) throws Exception {
-        BazaarDraft draft = bazaarDrafts.remove(player.getUniqueId());
-        if (draft == null) { openBazaar(player); return; }
-        ItemStack removed = null;
-        if (draft.side == OrderSide.SELL) {
-            removed = removeMaterial(player, draft.product.material, draft.quantity);
-            if (removed == null) { player.sendMessage("§cYou do not have enough unmodified items for this sell offer."); openProduct(player, draft.product, draft.quantity); return; }
-            player.saveData();
-        }
-        try {
-            var result = bazaar.place(player.getUniqueId(), draft.product.id, draft.side, draft.price, draft.quantity,
-                    false, UUID.randomUUID().toString(), System.currentTimeMillis());
-            if (removed != null && !accepted(result)) restoreItem(player, removed);
-            player.sendMessage("§e" + result.message() + (result.orderId() == null ? "" : " · " + result.filled() + " filled, " + result.remaining() + " open"));
-            if (result.orderId() != null) deliverBazaarClaims(player);
-        } catch (Exception failure) { if (removed != null) restoreItem(player, removed); throw failure; }
-        openMyBazaarOrders(player);
+        BazaarDraft draft=bazaarDrafts.remove(player.getUniqueId());if(draft==null){openBazaar(player);return;}
+        var result=submitCommodityOrder(player,draft.product,draft.side,draft.quantity,draft.price,false);
+        player.sendMessage("§e"+result.message()+" · "+result.filled()+" filled, "+result.remaining()+" remaining.");
+        deliverBazaarClaims(player);openMyBazaarOrders(player);
     }
 
     private void tradeNpcBuy(org.bukkit.entity.Player player, MarketProduct product, int quantity) throws Exception {
@@ -780,16 +729,16 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     }
 
     private void tradeNpcSell(org.bukkit.entity.Player player, MarketProduct product, int quantity) throws Exception {
-        if (product == null) return;
-        var quote = npcLiquidity.quote(product.policy, System.currentTimeMillis());
-        if (quote.bidQuantity() < quantity) { player.sendMessage("§cSystem buy budget changed; available: " + quote.bidQuantity()); openProduct(player, product, quantity); return; }
-        ItemStack removed = removeMaterial(player, product.material, quantity);
-        if (removed == null) { player.sendMessage("§cYou do not have enough unmodified items."); openProduct(player, product, quantity); return; }
-        player.saveData();
-        var outcome = npcLiquidity.sellToNpc(product.policy, player.getUniqueId(), quantity, quote.bidMinor(), UUID.randomUUID().toString(), System.currentTimeMillis());
-        if (outcome == NpcLiquidityService.Outcome.TRADED) player.sendMessage("§aSold " + quantity + " × " + pretty(product.id) + " for " + coins(Math.multiplyExact(quote.bidMinor(), quantity) - MoneyMath.fee(Math.multiplyExact(quote.bidMinor(), quantity), 100)) + " Coins.");
-        else { restoreItem(player, removed); player.sendMessage("§cSystem sell failed: " + outcome); }
-        openProduct(player, product, quantity);
+        if(product==null)return;
+        var quote=npcLiquidity.quote(product.policy,System.currentTimeMillis());
+        if(quote.bidQuantity()<quantity){player.sendMessage("§cNPC liquidity is insufficient.");return;}
+        String operation=UUID.randomUUID().toString();
+        if(removeProduct(player,product,quantity,network.nexora.core.api.InventoryJournal.Domain.NPC_TRADE,operation)==null){player.sendMessage("§cNot enough matching items.");return;}
+        try {
+            var outcome=npcLiquidity.sellToNpc(product.policy,player.getUniqueId(),quantity,quote.bidMinor(),operation,System.currentTimeMillis());
+            player.sendMessage("§eNPC sale: "+outcome);
+        }finally{core.resolveInventoryOperation(player);}
+        openProduct(player,product,quantity);
     }
 
     private void settleExpiredAuctions() {
@@ -800,7 +749,7 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     private void handleMarketClick(org.bukkit.entity.Player player, String action) {
         try {
             if (action.startsWith("bazaar-product:")) { MarketProduct product = products.get(action.substring("bazaar-product:".length())); if (product != null) openProduct(player, product); return; }
-            if (action.startsWith("bazaar-quantity:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1]); if (product != null) openProduct(player, product, Integer.parseInt(bits[2])); return; }
+            if (action.startsWith("bazaar-quantity:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1].replace("%3A", ":")); if (product != null) openProduct(player, product, Integer.parseInt(bits[2])); return; }
             if (action.startsWith("bazaar-standard-price:")) { String[] bits = action.split(":"); MarketProduct product = products.get("nexora:infinite_rocket");
                 StandardBazaarDraft draft = new StandardBazaarDraft(product, OrderSide.valueOf(bits[1]), Integer.parseInt(bits[2]), 0, false);
                 openStandardBazaarPriceSign(player, draft); return; }
@@ -818,9 +767,9 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
             if (action.startsWith("bazaar-cancel-execute:")) { UUID id = UUID.fromString(action.substring("bazaar-cancel-execute:".length())); var result = bazaar.cancel(player.getUniqueId(), id, UUID.randomUUID().toString(), System.currentTimeMillis()); player.sendMessage("§e" + result.message()); if (result.outcome() == BazaarOrderService.Outcome.CANCELLED) deliverBazaarClaims(player); openMyBazaarOrders(player); return; }
             if (action.startsWith("bazaar-standard-cancel-confirm:")) { UUID id = UUID.fromString(action.substring("bazaar-standard-cancel-confirm:".length())); openBazaarConfirmation(player, "Cancel Rocket order?", "Unused Coins or Rocket instances return as claims.", "bazaar-standard-cancel:" + id); return; }
             if (action.startsWith("bazaar-standard-cancel:")) { UUID id = UUID.fromString(action.substring("bazaar-standard-cancel:".length())); var result = standardizedBazaar.cancel(player.getUniqueId(), id, System.currentTimeMillis()); player.sendMessage("§eRocket order: " + result.outcome()); deliverStandardizedBazaarClaims(player); openMyBazaarOrders(player); return; }
-            if (action.startsWith("bazaar-npc-buy:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1]); tradeNpcBuy(player, product, Integer.parseInt(bits[2])); return; }
-            if (action.startsWith("bazaar-npc-sell:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1]); tradeNpcSell(player, product, Integer.parseInt(bits[2])); return; }
-            if (action.startsWith("bazaar-order:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1]); confirmBazaarOrder(player, product, OrderSide.valueOf(bits[2]), Integer.parseInt(bits[3]), Long.parseLong(bits[4])); return; }
+            if (action.startsWith("bazaar-npc-buy:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1].replace("%3A", ":")); tradeNpcBuy(player, product, Integer.parseInt(bits[2])); return; }
+            if (action.startsWith("bazaar-npc-sell:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1].replace("%3A", ":")); tradeNpcSell(player, product, Integer.parseInt(bits[2])); return; }
+            if (action.startsWith("bazaar-order:")) { String[] bits = action.split(":"); MarketProduct product = products.get(bits[1].replace("%3A", ":")); confirmBazaarOrder(player, product, OrderSide.valueOf(bits[2]), Integer.parseInt(bits[3]), Long.parseLong(bits[4])); return; }
             if (action.equals("bazaar-order-confirm")) { executeBazaarOrder(player); return; }
             if (action.equals("bazaar:back")) { openBazaar(player); return; }
             if (action.equals("bazaar:claim")) { deliverBazaarClaims(player); return; }
@@ -859,24 +808,23 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                 }
                 String itemId = draft.item.hasItemMeta() ? draft.item.getItemMeta().getPersistentDataContainer().get(
                         NamespacedKey.fromString("nexoraprogression:item_id"), PersistentDataType.STRING) : null;
-                boolean uniqueRocket = "nexora:infinite_rocket".equals(itemId);
-                if (!uniqueRocket) { player.getInventory().setItemInMainHand(null); player.saveData(); }
+                var definition=itemId==null?null:itemCatalog.entries().get(itemId);
+                if(itemId!=null && (definition==null || !definition.auction() || !itemId.equals(itemCatalog.identify(draft.item)))) {
+                    player.sendMessage("§cThat custom item is not approved for auctions.");return;
+                }
+                if(draft.item.hasItemMeta() && draft.item.getItemMeta().getPersistentDataContainer().has(NamespacedKey.fromString("nexoracore:navigation_item"))) {
+                    player.sendMessage("§cNavigation items cannot be traded.");return;
+                }
+                String instanceId=draft.item.hasItemMeta()?draft.item.getItemMeta().getPersistentDataContainer().get(NamespacedKey.fromString("nexoraprogression:item_instance_id"),PersistentDataType.STRING):null;
+                String operation=UUID.randomUUID().toString();
+                ItemStack[] after=player.getInventory().getContents();for(int i=0;i<after.length;i++)after[i]=after[i]==null?null:after[i].clone();
+                after[player.getInventory().getHeldItemSlot()]=null;
+                core.applyInventoryOperation(player,network.nexora.core.api.InventoryJournal.Domain.AUCTION_LIST,operation,after);
                 try {
-                    String instanceId = uniqueRocket
-                            ? draft.item.getItemMeta().getPersistentDataContainer().get(
-                                    NamespacedKey.fromString("nexoraprogression:item_instance_id"), PersistentDataType.STRING) : null;
-                    if (uniqueRocket && instanceId == null)
-                        throw new IllegalStateException("Infinite Rocket is missing its unique instance id");
-                    var result = auctionHouse.create(player.getUniqueId(), draft.mode, draft.priceMinor, draft.durationMillis,
-                            draft.item.getType().getKey().toString(), draft.item.serializeAsBytes(), instanceId,
-                            UUID.randomUUID().toString(), System.currentTimeMillis());
-                    if (result.outcome() == AuctionHouseService.Outcome.CREATED) {
-                        if (uniqueRocket) { player.getInventory().setItemInMainHand(null); player.saveData(); }
-                    } else if (!uniqueRocket) {
-                        restoreItem(player, draft.item);
-                    }
-                    player.sendMessage("§e" + result.message());
-                } catch (Exception ex) { if (!uniqueRocket) restoreItem(player, draft.item); throw ex; }
+                    var result=auctionHouse.create(player.getUniqueId(),draft.mode,draft.priceMinor,draft.durationMillis,
+                            itemId==null?draft.item.getType().getKey().toString():itemId,draft.item.serializeAsBytes(),instanceId,operation,System.currentTimeMillis());
+                    player.sendMessage("§e"+result.message());
+                }finally{core.resolveInventoryOperation(player);}
                 openAuctionHouse(player); return;
             }
             if (action.startsWith("ah-buy-execute:")) {
@@ -901,7 +849,7 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                 openMyAuctions(player, false); return;
             }
             if (action.startsWith("npc-buy:") || action.startsWith("npc-sell:")) {
-                String[] p = action.split(":"); MarketProduct product = products.get(p[1]); int quantity = Integer.parseInt(p[2]);
+                String[] p = action.split(":"); MarketProduct product = products.get(p[1].replace("%3A", ":")); int quantity = Integer.parseInt(p[2]);
                 var q = npcLiquidity.quote(product.policy, System.currentTimeMillis());
                 if (action.startsWith("npc-buy:")) {
                     long available = Math.min(quantity, q.askQuantity()); if (available <= 0) { player.sendMessage("§cNo System stock available."); return; }
@@ -909,12 +857,8 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
                     if (result == NpcLiquidityService.Outcome.TRADED) deliverBazaarClaims(player); else player.sendMessage("§cNPC offer unavailable: " + result);
                 } else {
                     long available = Math.min(quantity, q.bidQuantity());
-                    ItemStack removed = available <= 0 ? null : removeMaterial(player, product.material, available);
-                    if (removed == null) { player.sendMessage("§cNo matching items or no funded System bid available."); return; }
-                    player.saveData();
-                    var result = npcLiquidity.sellToNpc(product.policy, player.getUniqueId(), removed.getAmount(), q.bidMinor(), UUID.randomUUID().toString(), System.currentTimeMillis());
-                    if (result == NpcLiquidityService.Outcome.TRADED) player.sendMessage("§aSold " + removed.getAmount() + " × " + pretty(product.id) + " to the System offer.");
-                    else { restoreItem(player, removed); player.sendMessage("§cSystem bid unavailable: " + result); }
+                    if(available<=0){player.sendMessage("§cNo funded NPC bid.");return;}
+                    tradeNpcSell(player,product,Math.toIntExact(available));
                 }
                 openProduct(player, product); return;
             }
@@ -926,8 +870,11 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
             deliverStandardizedBazaarClaims(player);
             for (var claim : bazaar.pendingItemClaims(player.getUniqueId())) {
                 MarketProduct product = products.get(claim.productId()); if (product == null) continue;
-                ItemStack item = new ItemStack(product.material, Math.toIntExact(Math.min(Integer.MAX_VALUE, claim.quantity())));
-                deliverClaim(player, item, claim.claimId(), () -> bazaar.markClaimed(player.getUniqueId(), claim.claimId(), System.currentTimeMillis()));
+                if(!canFit(player,marketStack(product,Math.toIntExact(Math.min(64,claim.quantity()))))){player.sendMessage("§eFree inventory space, then claim again.");return;}
+                var portion=bazaar.claimPortion(player.getUniqueId(),claim.claimId(),Math.min(64,claim.quantity()),System.currentTimeMillis());
+                if(portion==null)continue;
+                ItemStack item = marketStack(product,Math.toIntExact(portion.quantity()));
+                deliverClaim(player, item, portion.claimId(), network.nexora.core.api.InventoryJournal.Domain.BAZAAR_CLAIM, () -> bazaar.markClaimed(player.getUniqueId(), portion.claimId(), System.currentTimeMillis()));
             }
         } catch (Exception ex) { getLogger().warning("Bazaar claim delivery failed: " + ex.getMessage()); player.sendMessage("§cItems remain in your Bazaar claims."); }
     }
@@ -935,7 +882,7 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
     private void deliverStandardizedBazaarClaims(org.bukkit.entity.Player player) throws Exception {
         for (var claim : standardizedBazaar.pendingClaims(player.getUniqueId())) {
             ItemStack item = ItemStack.deserializeBytes(claim.snapshot());
-            deliverClaim(player, item, claim.claimId(), () -> standardizedBazaar.markClaimed(player.getUniqueId(), claim.claimId(), System.currentTimeMillis()));
+            deliverClaim(player, item, claim.claimId(), network.nexora.core.api.InventoryJournal.Domain.STANDARD_CLAIM, () -> standardizedBazaar.markClaimed(player.getUniqueId(), claim.claimId(), System.currentTimeMillis()));
         }
     }
 
@@ -943,17 +890,30 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
         try {
             for (var claim : auctionHouse.pendingClaims(player.getUniqueId())) {
                 ItemStack item = ItemStack.deserializeBytes(claim.snapshot());
-                deliverClaim(player, item, claim.claimId(), () -> auctionHouse.markClaimed(player.getUniqueId(), claim.claimId(), System.currentTimeMillis()));
+                deliverClaim(player, item, claim.claimId(), network.nexora.core.api.InventoryJournal.Domain.AUCTION_CLAIM, () -> auctionHouse.markClaimed(player.getUniqueId(), claim.claimId(), System.currentTimeMillis()));
             }
         } catch (Exception ex) { getLogger().warning("Auction claim delivery failed: " + ex.getMessage()); player.sendMessage("§cItems remain in your Auction House claims."); }
     }
 
-    private void deliverClaim(org.bukkit.entity.Player player, ItemStack item, String claimId, SqlAction acknowledge) throws Exception {
-        if (containsClaim(player, claimId)) { acknowledge.run(); return; }
-        ItemMeta meta = item.getItemMeta(); meta.getPersistentDataContainer().set(claimKey, PersistentDataType.STRING, claimId); item.setItemMeta(meta);
-        if (!canFit(player, item)) { player.sendMessage("§eFree inventory space, then claim your item again."); return; }
-        player.getInventory().addItem(item); player.saveData(); acknowledge.run();
-        player.sendMessage("§aClaimed " + item.getAmount() + " × " + pretty(item.getType().getKey().getKey()) + ".");
+    private void deliverClaim(org.bukkit.entity.Player player, ItemStack item, String claimId, network.nexora.core.api.InventoryJournal.Domain domain, SqlAction acknowledge) throws Exception {
+        if(!canFit(player,item)){player.sendMessage("§eFree inventory space, then claim again.");return;}
+        ItemStack[] after=player.getInventory().getContents();
+        for(int i=0;i<after.length;i++)after[i]=after[i]==null?null:after[i].clone();
+        int remaining=item.getAmount();int storageSize=player.getInventory().getStorageContents().length;
+        for(int i=0;i<storageSize && remaining>0;i++){
+            if(after[i]==null||!after[i].isSimilar(item))continue;
+            int moved=Math.min(remaining,Math.max(0,item.getMaxStackSize()-after[i].getAmount()));after[i].setAmount(after[i].getAmount()+moved);remaining-=moved;
+        }
+        for(int i=0;i<storageSize && remaining>0;i++){
+            if(after[i]!=null&&!after[i].getType().isAir())continue;
+            int moved=Math.min(remaining,item.getMaxStackSize());after[i]=item.clone();after[i].setAmount(moved);remaining-=moved;
+        }
+        if(remaining!=0)throw new IllegalStateException("Claim inventory plan is inconsistent");
+        core.applyInventoryOperation(player,domain,claimId,after);
+        try{acknowledge.run();}finally{core.resolveInventoryOperation(player);}
+        String identity=itemCatalog.identify(item);
+        String label=identity==null?pretty(item.getType().getKey().getKey()):itemCatalog.entries().get(identity).name();
+        player.sendMessage("§aClaimed "+item.getAmount()+" × "+label+".");
     }
 
     private boolean containsClaim(org.bukkit.entity.Player player, String id) {
@@ -970,19 +930,27 @@ public final class NexoraTradingPlugin extends JavaPlugin implements Listener {
         return room >= item.getAmount();
     }
 
-    private ItemStack removeMaterial(org.bukkit.entity.Player player, Material material, long requested) {
-        if (requested <= 0 || requested > Integer.MAX_VALUE) return null;
-        int amount = (int) requested; ItemStack removed = new ItemStack(material, amount);
-        int available = 0; for (ItemStack stack : player.getInventory().getStorageContents()) if (stack != null && stack.getType() == material && !stack.hasItemMeta()) available += stack.getAmount();
-        if (available < amount) return null;
-        int left = amount;
-        for (int i = 0; i < player.getInventory().getStorageContents().length && left > 0; i++) {
-            ItemStack stack = player.getInventory().getItem(i);
-            if (stack == null || stack.getType() != material || stack.hasItemMeta()) continue;
-            int take = Math.min(left, stack.getAmount()); left -= take;
-            if (take == stack.getAmount()) player.getInventory().setItem(i, null); else stack.setAmount(stack.getAmount() - take);
+    private ItemStack marketStack(MarketProduct product,int amount) {
+        ItemStack item=product.id.startsWith("nexora:")?itemCatalog.create(product.id,1):new ItemStack(product.material);
+        item.setAmount(amount);return item;
+    }
+    private boolean matchesProduct(ItemStack stack,MarketProduct product) {
+        if(stack==null)return false;
+        return product.id.startsWith("nexora:")?itemCatalog.matches(stack,product.id):stack.getType()==product.material&&!stack.hasItemMeta();
+    }
+    private ItemStack removeProduct(org.bukkit.entity.Player player,MarketProduct product,long requested,network.nexora.core.api.InventoryJournal.Domain domain,String operation) throws SQLException {
+        if(requested<=0||requested>Integer.MAX_VALUE)return null;
+        ItemStack[] after=player.getInventory().getContents();
+        for(int i=0;i<after.length;i++)after[i]=after[i]==null?null:after[i].clone();
+        long remaining=requested;
+        for(int i=0;i<player.getInventory().getStorageContents().length && remaining>0;i++) {
+            ItemStack stack=after[i];if(!matchesProduct(stack,product))continue;
+            int take=(int)Math.min(remaining,stack.getAmount());remaining-=take;
+            if(take==stack.getAmount())after[i]=null;else stack.setAmount(stack.getAmount()-take);
         }
-        return removed;
+        if(remaining!=0)return null;
+        core.applyInventoryOperation(player,domain,operation,after);
+        return marketStack(product,(int)requested);
     }
 
     private void restoreItem(org.bukkit.entity.Player player, ItemStack item) {

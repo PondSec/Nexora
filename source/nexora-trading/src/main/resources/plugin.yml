@@ -2,7 +2,7 @@ name: NexoraTrading
 version: 0.1.0
 main: network.nexora.trading.NexoraTradingPlugin
 api-version: '1.21'
-depend: [NexoraCore]
+depend: [NexoraCore, NexoraProgression]
 description: Nexora Bank, Bazaar and Auction House backed by the Core SQLite wallet.
 commands:
   bank:

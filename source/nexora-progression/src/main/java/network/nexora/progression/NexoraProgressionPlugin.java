@@ -41,6 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /** Runtime adapter for persistent collection unlocks and the advanced compression recipe book. */
 public final class NexoraProgressionPlugin extends JavaPlugin implements Listener {
     private ContentRegistry content;
+    private RegistryItemCatalog itemCatalog;
     private CollectionRecipeUnlockStore unlocks;
     private NamespacedKey itemIdKey;
     private NamespacedKey itemInstanceKey;
@@ -61,7 +62,9 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         actionKey = new NamespacedKey(this, "recipe_action");
         try {
             content = DefaultContentCatalog.create();
-            unlocks = new CollectionRecipeUnlockStore(core.getDataFolder().toPath().resolve("nexora.sqlite"));
+            itemCatalog = new RegistryItemCatalog(content);
+            Bukkit.getServicesManager().register(network.nexora.core.api.CustomItemCatalog.class, itemCatalog, this, org.bukkit.plugin.ServicePriority.Normal);
+            unlocks = new CollectionRecipeUnlockStore(core.getDataFolder().toPath().resolve("nexora.sqlite"), ((network.nexora.core.NexoraCore)core).skillCurve());
         } catch (SQLException | RuntimeException exception) {
             getLogger().severe("Could not initialize persistent progression: " + exception.getMessage());
             Bukkit.getPluginManager().disablePlugin(this);
@@ -149,63 +152,28 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onCollectionBlockBreak(BlockBreakEvent event) {
-        String collection = collectionFor(event.getBlock().getType());
-        if (collection == null || CORE_COLLECTIONS.contains(collection)) return;
-        try {
-            if (unlocks.consumePlacedBlock(event.getBlock().getWorld().getName(), event.getBlock().getX(),
-                    event.getBlock().getY(), event.getBlock().getZ())) return;
-        } catch (SQLException exception) {
-            getLogger().warning("Could not verify collection block origin: " + exception.getMessage()); return;
-        }
-        recordExtendedGather(event.getPlayer().getUniqueId(), Map.of(collection, 1L));
+        if(collectionFor(event.getBlock().getType())!=null)scheduleUnlockReconciliation(event.getPlayer().getUniqueId());
     }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onCollectionBlockPlace(BlockPlaceEvent event) {
-        String collection = collectionFor(event.getBlockPlaced().getType());
-        if (collection == null || CORE_COLLECTIONS.contains(collection)) return;
-        var block = event.getBlockPlaced();
-        try { unlocks.markPlacedBlock(block.getWorld().getName(), block.getX(), block.getY(), block.getZ(),
-                event.getPlayer().getUniqueId(), System.currentTimeMillis()); }
-        catch (SQLException exception) { getLogger().warning("Could not mark placed collection block: " + exception.getMessage()); }
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority=EventPriority.MONITOR)
     public void onCombatCollectionDrop(EntityDeathEvent event) {
-        var killer = event.getEntity().getKiller();
-        if (killer == null) return;
-        Map<String,Long> gathered = new java.util.HashMap<>();
-        for (ItemStack drop : event.getDrops()) {
-            String collection = collectionFor(drop.getType());
-            if (collection != null && !CORE_COLLECTIONS.contains(collection)) gathered.merge(collection, (long) drop.getAmount(), Long::sum);
-        }
-        if (!gathered.isEmpty()) recordExtendedGather(killer.getUniqueId(), gathered);
+        if(event.getEntity().getKiller()!=null)scheduleUnlockReconciliation(event.getEntity().getKiller().getUniqueId());
     }
-
-    private static final Set<String> CORE_COLLECTIONS = Set.of("cobblestone","coal","iron","gold","diamond","emerald",
-            "redstone","lapis","wheat","carrot","potato","melon","pumpkin","sugar_cane","oak_wood","spruce_wood","birch_wood");
-
-    private void recordExtendedGather(UUID profileId, Map<String,Long> gathered) {
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            try {
-                unlocks.recordCollections(profileId, gathered);
-                List<String> newlyUnlocked = unlocks.unlockEligibleRecipes(profileId, content, System.currentTimeMillis());
-                if (!newlyUnlocked.isEmpty()) Bukkit.getScheduler().runTask(this, () -> notifyRecipeUnlocks(profileId, newlyUnlocked));
-            } catch (SQLException | RuntimeException exception) {
-                getLogger().warning("New Collection progress could not be saved for " + profileId + ": " + exception.getMessage());
-            }
-        });
+    @EventHandler(priority=EventPriority.MONITOR,ignoreCancelled=true)
+    public void onFishingCollections(org.bukkit.event.player.PlayerFishEvent event) {
+        if(event.getState()==org.bukkit.event.player.PlayerFishEvent.State.CAUGHT_FISH)scheduleUnlockReconciliation(event.getPlayer().getUniqueId());
     }
 
     private void notifyRecipeUnlocks(UUID profileId, List<String> newlyUnlocked) {
         var player = Bukkit.getPlayer(profileId);
         if (player == null) return;
         player.sendMessage("§b§lNEXORA RECIPE UNLOCKS");
-        for (String recipeId : newlyUnlocked) {
+        for (String recipeId : newlyUnlocked.stream().limit(5).toList()) {
             RecipeDefinition recipe = content.recipes().get(recipeId);
             ItemDefinition output = content.items().get(recipe.outputItemId());
             player.sendMessage("§aUnlocked: §f" + displayName(output) + " Recipe");
         }
+        if(newlyUnlocked.size()>5)player.sendMessage("§a… and "+(newlyUnlocked.size()-5)+" more recipes.");
+        player.playSound(player.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_CHIME,0.5f,1.5f);
         player.sendMessage("§7Open §f/recipebook §7to craft your unlocked recipes.");
     }
 
@@ -498,9 +466,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
     }
 
     private boolean isInfiniteRocket(ItemStack item) {
-        return item != null && item.getType() == Material.FIREWORK_ROCKET && item.hasItemMeta()
-                && "nexora:infinite_rocket".equals(item.getItemMeta().getPersistentDataContainer()
-                .get(itemIdKey, PersistentDataType.STRING));
+        return "nexora:infinite_rocket".equals(itemCatalog.identify(item));
     }
 
     @EventHandler public void onQuit(PlayerQuitEvent event) {
@@ -525,58 +491,20 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
                 var player = Bukkit.getPlayer(profileId);
                 if (player == null) return;
                 player.sendMessage("§b§lNEXORA RECIPE UNLOCKS");
-                for (String recipeId : newlyUnlocked) {
+                for (String recipeId : newlyUnlocked.stream().limit(5).toList()) {
                     RecipeDefinition recipe = content.recipes().get(recipeId);
                     ItemDefinition output = content.items().get(recipe.outputItemId());
                     player.sendMessage("§aUnlocked: §f" + displayName(output) + " Recipe");
                 }
-                player.sendMessage("§7Open §f/recipebook §7to craft your unlocked recipes.");
+                if(newlyUnlocked.size()>5)player.sendMessage("§a… and "+(newlyUnlocked.size()-5)+" more recipes.");
+        player.playSound(player.getLocation(),org.bukkit.Sound.BLOCK_NOTE_BLOCK_CHIME,0.5f,1.5f);
+        player.sendMessage("§7Open §f/recipebook §7to craft your unlocked recipes.");
             });
             });
         }, 5L));
     }
 
-    private String collectionFor(Material material) {
-        return switch (material) {
-            case STONE, COBBLESTONE -> "cobblestone";
-            case COAL_ORE, DEEPSLATE_COAL_ORE, COAL -> "coal";
-            case IRON_ORE, DEEPSLATE_IRON_ORE, IRON_INGOT -> "iron";
-            case GOLD_ORE, DEEPSLATE_GOLD_ORE, GOLD_INGOT -> "gold";
-            case DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, DIAMOND -> "diamond";
-            case EMERALD_ORE, DEEPSLATE_EMERALD_ORE, EMERALD -> "emerald";
-            case REDSTONE_ORE, DEEPSLATE_REDSTONE_ORE, REDSTONE -> "redstone";
-            case LAPIS_ORE, DEEPSLATE_LAPIS_ORE, LAPIS_LAZULI -> "lapis";
-            case NETHER_QUARTZ_ORE, QUARTZ -> "quartz";
-            case OBSIDIAN -> "obsidian";
-            case GLOWSTONE, GLOWSTONE_DUST -> "glowstone_dust";
-            case END_STONE -> "end_stone";
-            case GRAVEL -> "gravel";
-            case FLINT -> "flint";
-            case SAND -> "sand";
-            case ICE, PACKED_ICE, BLUE_ICE -> "ice";
-            case SNOW, SNOW_BLOCK, SNOWBALL -> "snow";
-            case WHEAT -> "wheat";
-            case CARROTS, CARROT -> "carrot";
-            case POTATOES, POTATO -> "potato";
-            case MELON, MELON_SLICE -> "melon";
-            case PUMPKIN -> "pumpkin";
-            case SUGAR_CANE -> "sugar_cane";
-            case CACTUS -> "cactus"; case COCOA, COCOA_BEANS -> "cocoa_beans";
-            case RED_MUSHROOM_BLOCK, RED_MUSHROOM -> "red_mushroom";
-            case BROWN_MUSHROOM_BLOCK, BROWN_MUSHROOM -> "brown_mushroom";
-            case NETHER_WART -> "nether_wart"; case WHEAT_SEEDS -> "seeds";
-            case LEATHER -> "leather"; case FEATHER -> "feather"; case CHICKEN -> "raw_chicken";
-            case BEEF -> "raw_beef"; case PORKCHOP -> "raw_porkchop";
-            case ROTTEN_FLESH -> "rotten_flesh"; case BONE -> "bone"; case STRING -> "string";
-            case SPIDER_EYE -> "spider_eye"; case GUNPOWDER -> "gunpowder"; case SLIME_BALL -> "slimeball";
-            case ENDER_PEARL -> "ender_pearl"; case BLAZE_ROD -> "blaze_rod";
-            case MAGMA_CREAM -> "magma_cream"; case GHAST_TEAR -> "ghast_tear";
-            case OAK_LOG, OAK_WOOD -> "oak_wood"; case SPRUCE_LOG, SPRUCE_WOOD -> "spruce_wood";
-            case BIRCH_LOG, BIRCH_WOOD -> "birch_wood"; case JUNGLE_LOG, JUNGLE_WOOD -> "jungle_wood";
-            case ACACIA_LOG, ACACIA_WOOD -> "acacia_wood"; case DARK_OAK_LOG, DARK_OAK_WOOD -> "dark_oak_wood";
-            default -> null;
-        };
-    }
+    private String collectionFor(Material material) { return network.nexora.core.GatheringPolicy.collectionId(material); }
 
     private void openRecipeBook(org.bukkit.entity.Player player) { openRecipeBook(player, 0); }
 
@@ -643,6 +571,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
             return;
         }
         boolean known = unlocks.isUnlocked(player.getUniqueId(), recipeId);
+        CraftingRules.Result preview = craftingCheck(player, recipe, 1, known);
         RecipeHolder holder = new RecipeHolder(backPage);
         Inventory inventory = Bukkit.createInventory(holder, 54, Component.text("RECIPE | " + displayName(content.items().get(recipe.outputItemId()))));
         holder.inventory = inventory;
@@ -665,6 +594,8 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
             outputLore.add(Component.text("§7Unlimited Elytra propulsion without consuming fireworks."));
         }
         outputLore.add(Component.text(known ? "§aRecipe Status: UNLOCKED" : "§cRecipe Status: LOCKED"));
+        outputLore.add(Component.text("§7Crafting: " + preview.name().replace('_',' ')));
+        if(recipe.requiredSkill()!=null)outputLore.add(Component.text("§7Requires "+recipe.requiredSkill()+" level "+recipe.requiredSkillLevel()));
         for (var requirement : recipe.collectionRequirements().entrySet().stream().sorted(Map.Entry.comparingByKey()).toList()) {
             CollectionDefinition collection = content.collections().get(requirement.getKey());
             long count = unlocks.collectionCount(player.getUniqueId(), requirement.getKey());
@@ -696,20 +627,27 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
             if (ingredientIndex < ingredientSlots.length) inventory.setItem(ingredientSlots[ingredientIndex++], icon);
         }
         if (known) {
-            inventory.setItem(46, action(Material.LIME_DYE, "§aCraft ×1", "craft:" + recipeId + ":1:" + backPage));
-            inventory.setItem(49, action(Material.LIME_DYE, "§aCraft ×4", "craft:" + recipeId + ":4:" + backPage));
-            inventory.setItem(52, action(Material.LIME_DYE, "§aCraft ×16", "craft:" + recipeId + ":16:" + backPage));
+            craftButton(inventory,46,recipeId,1,backPage,preview);
+            craftButton(inventory,49,recipeId,4,backPage,craftingCheck(player,recipe,4,true));
+            craftButton(inventory,52,recipeId,16,backPage,craftingCheck(player,recipe,16,true));
         } else inventory.setItem(49, action(Material.BARRIER, "§cLocked · see missing collections above", "noop"));
         inventory.setItem(53, action(Material.ARROW, "§eBack to Recipe Book", "book:" + backPage));
         player.openInventory(inventory);
     }
 
+    private void craftButton(Inventory inventory,int slot,String recipeId,int times,int backPage,CraftingRules.Result result) {
+        inventory.setItem(slot,result==CraftingRules.Result.READY
+                ?action(Material.LIME_DYE,"§aCraft ×"+times,"craft:"+recipeId+":"+times+":"+backPage)
+                :action(Material.GRAY_DYE,"§7Craft ×"+times+" · "+result.name().replace('_',' '),"noop"));
+    }
     private void craft(org.bukkit.entity.Player player, String recipeId, int times, int backPage) throws SQLException {
         RecipeDefinition recipe = content.recipes().get(recipeId);
         if (recipe == null || times < 1 || times > 16 || !unlocks.isUnlocked(player.getUniqueId(), recipeId)) {
             player.sendMessage("§cThis recipe is unavailable on your profile.");
             return;
         }
+        CraftingRules.Result validation = craftingCheck(player, recipe, times, true);
+        if (validation != CraftingRules.Result.READY) { player.sendMessage("§cCannot craft: " + validation.name().replace('_', ' ')); return; }
         ItemDefinition outputDefinition = content.items().get(recipe.outputItemId());
         long outputAmount = Math.multiplyExact(recipe.outputAmount(), times);
         ItemStack[] next = cloneItems(player.getInventory().getStorageContents());
@@ -724,10 +662,51 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
             player.sendMessage("§cMake room in your inventory before crafting.");
             return;
         }
-        player.getInventory().setStorageContents(next);
-        player.saveData();
+        var core=(network.nexora.core.NexoraCore)Bukkit.getPluginManager().getPlugin("NexoraCore");
+        ItemStack[] after=cloneItems(player.getInventory().getContents());
+        System.arraycopy(next,0,after,0,next.length);
+        String operation=UUID.randomUUID().toString();
+        try {
+            core.applyInventoryOperation(player,network.nexora.core.api.InventoryJournal.Domain.CRAFT,operation,after);
+            core.commitCraftInventory(player,operation);
+        }catch(SQLException|RuntimeException failure){core.resolveInventoryOperation(player);throw failure;}
         player.sendMessage("§aCrafted " + outputAmount + " × " + displayName(outputDefinition) + ".");
         openRecipe(player, recipeId, backPage);
+    }
+
+    private CraftingRules.Result craftingCheck(org.bukkit.entity.Player player, RecipeDefinition recipe, int times, boolean unlocked) throws SQLException {
+        Map<String,Long> available = new java.util.HashMap<>();
+        for(ItemStack item:player.getInventory().getStorageContents()) {
+            String id=itemCatalog.identify(item); if(id!=null)available.merge(id,(long)item.getAmount(),Long::sum);
+        }
+        Map<String,Integer> skills = new java.util.HashMap<>(), tiers = new java.util.HashMap<>();
+        if(recipe.requiredSkill()!=null)skills.put(recipe.requiredSkill(),unlocks.skillLevel(player.getUniqueId(),recipe.requiredSkill()));
+        for(String collection:recipe.collectionRequirements().keySet())tiers.put(collection,content.collections().get(collection).tierFor(unlocks.collectionCount(player.getUniqueId(),collection)));
+        CraftingRules.Result result=CraftingRules.check(recipe,times,unlocked,available,skills,tiers);
+        if(result!=CraftingRules.Result.READY)return result;
+        ItemStack[] simulated=cloneItems(player.getInventory().getStorageContents());
+        for(var ingredient:recipe.ingredients().entrySet())
+            if(!remove(simulated,ingredient.getKey(),Math.multiplyExact(ingredient.getValue(),times)))return CraftingRules.Result.MISSING_MATERIALS;
+        return insert(simulated,content.items().get(recipe.outputItemId()),Math.multiplyExact(recipe.outputAmount(),times))?CraftingRules.Result.READY:CraftingRules.Result.NO_SPACE;
+    }
+
+    // Custom ingredients must never be stripped into vanilla outputs by a material-only recipe.
+    @EventHandler(priority=EventPriority.HIGHEST)
+    public void onVanillaCraftPreview(org.bukkit.event.inventory.PrepareItemCraftEvent event) {
+        if(java.util.Arrays.stream(event.getInventory().getMatrix()).anyMatch(this::customIngredient) || !minionRecipeAllowed(event.getInventory().getResult(),event.getViewers().isEmpty()?null:event.getViewers().getFirst()))event.getInventory().setResult(null);
+    }
+    @EventHandler(priority=EventPriority.HIGHEST,ignoreCancelled=true)
+    public void onVanillaCraft(org.bukkit.event.inventory.CraftItemEvent event) {
+        if(java.util.Arrays.stream(event.getInventory().getMatrix()).anyMatch(this::customIngredient) || !minionRecipeAllowed(event.getRecipe().getResult(),event.getWhoClicked()))event.setCancelled(true);
+    }
+    private boolean minionRecipeAllowed(ItemStack result,org.bukkit.entity.HumanEntity player) {
+        if(result==null)return true;
+        String id=itemCatalog.identify(result);if(id==null||!id.startsWith("nexora:minion_"))return true;
+        if(player==null)return false;
+        try{return unlocks.isUnlocked(player.getUniqueId(),id);}catch(SQLException error){getLogger().warning("Minion recipe gate failed: "+error.getMessage());return false;}
+    }
+    private boolean customIngredient(ItemStack stack) {
+        return stack!=null && stack.hasItemMeta() && stack.getItemMeta().getPersistentDataContainer().has(RegistryItemCatalog.ID,PersistentDataType.STRING);
     }
 
     private boolean remove(ItemStack[] inventory, String itemId, long amount) {
@@ -745,7 +724,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
 
     private boolean insert(ItemStack[] inventory, ItemDefinition definition, long amount) {
         Material material = material(definition);
-        int maxStack = definition.id().equals("nexora:infinite_rocket") ? 1 : material.getMaxStackSize();
+        int maxStack = itemCatalog.entries().get(definition.id()).maxStack();
         ItemStack prototype = itemStack(definition, 1);
         long remaining = amount;
         for (ItemStack stack : inventory) {
@@ -765,13 +744,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         return remaining == 0;
     }
 
-    private boolean matches(ItemStack stack, String itemId) {
-        String actual = stack.getItemMeta() == null ? null
-                : stack.getItemMeta().getPersistentDataContainer().get(itemIdKey, PersistentDataType.STRING);
-        if (itemId.startsWith("nexora:")) return itemId.equals(actual);
-        if (actual != null || stack.hasItemMeta()) return false;
-        return stack.getType() == material(content.items().get(itemId));
-    }
+    private boolean matches(ItemStack stack, String itemId) { return itemCatalog.matches(stack, itemId); }
 
     private long itemCount(org.bukkit.entity.Player player, String itemId) {
         long count = 0;
@@ -793,28 +766,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
                 + (next == 0 ? " · §aMax tier" : " · §7Next tier " + count + "/" + next));
     }
 
-    private ItemStack itemStack(ItemDefinition definition, int amount) {
-        int safeAmount = definition.id().equals("nexora:infinite_rocket") ? 1 : Math.max(1, amount);
-        ItemStack stack = new ItemStack(material(definition), safeAmount);
-        if (!definition.id().startsWith("nexora:")) return stack;
-        ItemMeta meta = stack.getItemMeta();
-        meta.displayName(Component.text((definition.id().equals("nexora:infinite_rocket") ? "§d§l" : "§d") + displayName(definition)));
-        List<Component> lore = new ArrayList<>();
-        lore.add(Component.text("§7" + definition.rarity() + " Nexora item"));
-        if (definition.id().equals("nexora:infinite_rocket")) {
-            lore.add(Component.text("§6Ability: Eternal Thrust"));
-            lore.add(Component.text("§7A legendary rocket powered by an eternal core."));
-            lore.add(Component.text("§7Provides unlimited Elytra propulsion without consuming fireworks."));
-            lore.add(Component.text("§7Cooldown: 1.5 seconds"));
-            lore.add(Component.text("§8Item ID: " + definition.id()));
-        } else lore.add(Component.text("§8Item ID: " + definition.id()));
-        meta.lore(lore);
-        meta.getPersistentDataContainer().set(itemIdKey, PersistentDataType.STRING, definition.id());
-        if (definition.id().equals("nexora:infinite_rocket"))
-            meta.getPersistentDataContainer().set(itemInstanceKey, PersistentDataType.STRING, UUID.randomUUID().toString());
-        stack.setItemMeta(meta);
-        return stack;
-    }
+    private ItemStack itemStack(ItemDefinition definition, int amount) { return itemCatalog.create(definition.id(), amount); }
 
     private ItemStack action(Material material, String title, String action) {
         return action(material, title, action, new String[0]);
@@ -836,17 +788,7 @@ public final class NexoraProgressionPlugin extends JavaPlugin implements Listene
         return material;
     }
 
-    private String displayName(ItemDefinition definition) {
-        String raw = definition.id().replace("nexora:double_enchanted_", "Double Enchanted ")
-                .replace("nexora:enchanted_", "Enchanted ").replace("minecraft:", "").replace('_', ' ');
-        StringBuilder title = new StringBuilder();
-        for (String word : raw.split("\\s+")) {
-            if (word.isEmpty()) continue;
-            if (!title.isEmpty()) title.append(' ');
-            title.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));
-        }
-        return title.toString();
-    }
+    private String displayName(ItemDefinition definition) { return RegistryItemCatalog.name(definition); }
 
     private String describeIngredients(RecipeDefinition recipe) {
         return recipe.ingredients().entrySet().stream().sorted(Map.Entry.comparingByKey())

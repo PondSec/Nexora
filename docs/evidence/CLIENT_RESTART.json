@@ -1,0 +1,17 @@
+{
+  "checks": [
+    "crafted minion survives server restart",
+    "traded custom item survives server restart",
+    "other profile materials survive restart"
+  ],
+  "messages": {
+    "NexoraTestA": [
+      "NexoraTestA joined the game",
+      "NexoraTestB joined the game"
+    ],
+    "NexoraTestB": [
+      "NexoraTestB joined the game"
+    ]
+  },
+  "passed": true
+}

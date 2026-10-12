@@ -16,8 +16,13 @@ import java.util.UUID;
 public final class CollectionRecipeUnlockStore {
     private static final int BUSY_TIMEOUT_MILLIS = 10_000;
     private final String jdbcUrl;
+    private final network.nexora.core.ProgressionMath.Curve skillCurve;
 
     public CollectionRecipeUnlockStore(Path nexoraCoreDatabase) throws SQLException {
+        this(nexoraCoreDatabase, network.nexora.core.ProgressionMath.SKILL_DEFAULT);
+    }
+    public CollectionRecipeUnlockStore(Path nexoraCoreDatabase, network.nexora.core.ProgressionMath.Curve skillCurve) throws SQLException {
+        this.skillCurve = Objects.requireNonNull(skillCurve);
         Objects.requireNonNull(nexoraCoreDatabase, "Core database path is required");
         jdbcUrl = "jdbc:sqlite:" + nexoraCoreDatabase.toAbsolutePath();
         try (Connection connection = connect(); Statement statement = connection.createStatement()) {
@@ -62,7 +67,7 @@ public final class CollectionRecipeUnlockStore {
                 List<String> unlocked = new ArrayList<>();
                 for (RecipeDefinition recipe : registry.recipes().values().stream()
                         .sorted(java.util.Comparator.comparing(RecipeDefinition::id)).toList()) {
-                    if (recipe.collectionRequirements().isEmpty()) continue;
+                    if (recipe.requiredSkill() != null && skillLevel(connection, profileId, recipe.requiredSkill()) < recipe.requiredSkillLevel()) continue;
                     boolean eligible = true;
                     for (var requirement : recipe.collectionRequirements().entrySet()) {
                         CollectionDefinition collection = registry.collections().get(requirement.getKey());
@@ -78,7 +83,7 @@ public final class CollectionRecipeUnlockStore {
                             + "(profile_uuid,recipe_id,collection_id,source_tier,unlocked_at) VALUES(?,?,?,?,?)")) {
                         insert.setString(1, profileId.toString());
                         insert.setString(2, recipe.id());
-                        insert.setString(3, source);
+                        insert.setString(3, source.isEmpty() ? "starter" : source);
                         insert.setInt(4, 1);
                         insert.setLong(5, nowMillis);
                         if (insert.executeUpdate() == 1) unlocked.add(recipe.id());
@@ -90,6 +95,17 @@ public final class CollectionRecipeUnlockStore {
                 rollback(connection, exception);
                 throw exception;
             }
+        }
+    }
+
+    public int skillLevel(UUID profileId, String skill) throws SQLException {
+        try (Connection connection = connect()) { return skillLevel(connection, profileId, skill); }
+    }
+    private int skillLevel(Connection connection, UUID profileId, String skill) throws SQLException {
+        if (!tableExists(connection,"skills")) return 1;
+        try (var query = connection.prepareStatement("SELECT xp FROM skills WHERE uuid=? AND skill=?")) {
+            query.setString(1,profileId.toString()); query.setString(2,skill);
+            try(var row=query.executeQuery()) { return network.nexora.core.ProgressionMath.skill(row.next()?row.getLong(1):0,skillCurve).level(); }
         }
     }
 

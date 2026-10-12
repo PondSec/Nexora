@@ -1,0 +1,10 @@
+name: NexoraPaperSmoke
+version: 0.1.0
+main: network.nexora.smoke.PaperSmoke
+api-version: '1.21'
+depend: [NexoraCore, NexoraProgression, NexoraTrading, NexoraFarm]
+
+commands:
+  nxsmoke:
+    description: Console-only isolated staging fixture setup
+    usage: /nxsmoke seed <NexoraTestA|NexoraTestB>

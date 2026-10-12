@@ -118,6 +118,62 @@ class StandardizedBazaarServiceTest {
         assertEquals(priceMinor, scalar(db, "SELECT unit_price_minor FROM standardized_bazaar_orders WHERE order_id='" + result.orderId() + "'"));
     }
 
+    @Test void deliveredRocketCanBeResoldRepeatedlyWithoutLosingHistoricalClaims() throws Exception {
+        var db=db(100_000,100_000);var bazaar=new StandardizedBazaarService(db);
+        var item=new StandardizedBazaarService.StandardItem("resell-instance",new byte[]{1,2,3});
+        for(int cycle=0;cycle<3;cycle++) {
+            UUID seller=id(cycle%2+1),buyer=id((cycle+1)%2+1);
+            var sell=bazaar.sell(seller,"nexora:infinite_rocket",100,List.of(item),"resell-"+cycle,cycle*10);
+            assertEquals(StandardizedBazaarService.Outcome.OPENED,sell.outcome());
+            assertEquals(StandardizedBazaarService.Outcome.FILLED,bazaar.buy(buyer,"nexora:infinite_rocket",100,1,"rebuy-"+cycle,cycle*10+1).outcome());
+            var claim=bazaar.pendingClaims(buyer).getFirst();
+            assertThrows(java.sql.SQLException.class,()->bazaar.markClaimed(seller,claim.claimId(),999));
+            bazaar.markClaimed(buyer,claim.claimId(),cycle*10+2);
+        }
+        assertEquals(3,scalar(db,"SELECT count(*) FROM standardized_bazaar_claims"));
+        assertEquals(3,scalar(db,"SELECT count(*) FROM standardized_bazaar_order_items"));
+        assertEquals(0,scalar(db,"SELECT count(*) FROM market_item_reservations"));
+    }
+
+    @Test void requestReplayDoesNotDebitOrCreateAnotherOrderAndRejectsDifferentPayload() throws Exception {
+        var db=db(100_000,100_000);var bazaar=new StandardizedBazaarService(db);
+        var first=bazaar.buy(id(1),"nexora:infinite_rocket",1000,2,"repeat-buy",10);
+        assertEquals(first,new StandardizedBazaarService(db).buy(id(1),"nexora:infinite_rocket",1000,2,"repeat-buy",20));
+        assertEquals(98_000,db.balanceMinor(id(1)));
+        assertEquals(1,scalar(db,"SELECT count(*) FROM standardized_bazaar_orders"));
+        assertThrows(IllegalArgumentException.class,()->bazaar.buy(id(1),"nexora:infinite_rocket",1001,2,"repeat-buy",30));
+        assertThrows(IllegalArgumentException.class,()->bazaar.buy(id(2),"nexora:infinite_rocket",1000,2,"repeat-buy",30));
+        var item=new StandardizedBazaarService.StandardItem("replay-sell",new byte[]{9});
+        var sell=bazaar.sell(id(2),"nexora:infinite_rocket",500,List.of(item),"repeat-sell",40);
+        assertEquals(sell,bazaar.sell(id(2),"nexora:infinite_rocket",500,List.of(item),"repeat-sell",50));
+        assertEquals(100_990,db.balanceMinor(id(2)));
+    }
+
+    @Test void migrationPreservesExistingPendingSnapshotsAndAllowsResaleAfterDelivery() throws Exception {
+        Path file=temp.resolve("legacy-v4.sqlite");String instance="legacy-rocket",order=UUID.randomUUID().toString(),claim=UUID.randomUUID().toString();
+        try(var c=DriverManager.getConnection("jdbc:sqlite:"+file);var statement=c.createStatement()) {
+            statement.execute("CREATE TABLE profiles(uuid TEXT PRIMARY KEY,balance_minor INTEGER NOT NULL)");
+            statement.execute("CREATE TABLE economy_ledger(id TEXT PRIMARY KEY,uuid TEXT NOT NULL,delta_minor INTEGER NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL)");
+            statement.execute("INSERT INTO profiles VALUES('"+id(1)+"',10000)");
+            for(String resource:List.of("V1__market.sql","V2__bank.sql","V3__market_maker.sql","V4__item_instance_reservations.sql")) {
+                try(var input=getClass().getResourceAsStream("/db/migration/"+resource)) {
+                    for(String command:new String(input.readAllBytes(),java.nio.charset.StandardCharsets.UTF_8).split(";"))if(!command.isBlank())statement.execute(command);
+                }
+            }
+            statement.execute("INSERT INTO standardized_bazaar_orders VALUES('"+order+"','"+id(1)+"','nexora:infinite_rocket','SELL',100,1,1,0,0,'CANCELLED',1,2)");
+            statement.execute("INSERT INTO standardized_bazaar_order_items VALUES('"+instance+"','"+order+"',X'010203','hash','CLAIMABLE','"+claim+"',2)");
+            statement.execute("INSERT INTO standardized_bazaar_claims VALUES('"+claim+"','"+id(1)+"','"+order+"','"+instance+"',X'010203','legacy-source',NULL,2)");
+            statement.execute("INSERT INTO market_item_reservations VALUES('"+instance+"','BAZAAR','"+claim+"','"+id(1)+"','CLAIMABLE',1,2)");
+        }
+        var db=new MarketplaceDatabase(file);var service=new StandardizedBazaarService(db);
+        assertArrayEquals(new byte[]{1,2,3},service.pendingClaims(id(1)).getFirst().snapshot());
+        service.markClaimed(id(1),claim,3);
+        assertEquals(StandardizedBazaarService.Outcome.OPENED,service.sell(id(1),"nexora:infinite_rocket",100,List.of(new StandardizedBazaarService.StandardItem(instance,new byte[]{1,2,3})),"after-migration",4).outcome());
+        assertEquals(2,scalar(new MarketplaceDatabase(file),"SELECT count(*) FROM standardized_bazaar_order_items"));
+        assertEquals(1,scalar(db,"SELECT count(*) FROM standardized_bazaar_claims"));
+        assertEquals("ok",scalarText(db,"PRAGMA integrity_check"));
+    }
+
     private static long scalar(MarketplaceDatabase db,String sql)throws Exception{try(var c=db.openConnection();var s=c.createStatement();var r=s.executeQuery(sql)){assertTrue(r.next());return r.getLong(1);}}
     private static String scalarText(MarketplaceDatabase db,String sql)throws Exception{try(var c=db.openConnection();var s=c.createStatement();var r=s.executeQuery(sql)){assertTrue(r.next());return r.getString(1);}}
 }

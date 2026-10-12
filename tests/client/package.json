@@ -1,0 +1,1 @@
+{"name":"nexora-client-tests","private":true,"scripts":{"test":"node progression.cjs"},"dependencies":{"mineflayer":"4.39.0"}}

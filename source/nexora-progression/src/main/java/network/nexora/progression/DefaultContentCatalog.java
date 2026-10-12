@@ -33,6 +33,10 @@ final class DefaultContentCatalog {
             r("magma_cream","magma_cream","MAGMA_CREAM","Magma Cream","combat"), r("ghast_tear","ghast_tear","GHAST_TEAR","Ghast Tear","combat"),
             r("oak_wood","oak_log","OAK_LOG","Oak Wood","foraging"), r("spruce_wood","spruce_log","SPRUCE_LOG","Spruce Wood","foraging"),
             r("birch_wood","birch_log","BIRCH_LOG","Birch Wood","foraging"), r("jungle_wood","jungle_log","JUNGLE_LOG","Jungle Wood","foraging"),
+            r("cod","cod","COD","Cod","fishing"),r("salmon","salmon","SALMON","Salmon","fishing"),
+            r("pufferfish","pufferfish","PUFFERFISH","Pufferfish","fishing"),r("tropical_fish","tropical_fish","TROPICAL_FISH","Tropical Fish","fishing"),
+            r("mangrove_wood","mangrove_log","MANGROVE_LOG","Mangrove Wood","foraging"),r("cherry_wood","cherry_log","CHERRY_LOG","Cherry Wood","foraging"),
+            r("pale_oak_wood","pale_oak_log","PALE_OAK_LOG","Pale Oak Wood","foraging"),r("bamboo_wood","bamboo_block","BAMBOO_BLOCK","Bamboo Wood","foraging"),
             r("acacia_wood","acacia_log","ACACIA_LOG","Acacia Wood","foraging"), r("dark_oak_wood","dark_oak_log","DARK_OAK_LOG","Dark Oak Wood","foraging")
     );
 
@@ -115,15 +119,35 @@ final class DefaultContentCatalog {
                         "nexora:astral_navigation_core",1L,"nexora:aerodynamic_stabilizer",1L,
                         "nexora:reinforced_rocket_chassis",1L,"nexora:enchanted_redstone",16L),
                 finalUnlock, "gunpowder", 10, null, 0));
+        registerMinions(registry);
         registerRecipeRewards(registry);
         registry.validateOrThrow();
         return registry;
     }
 
+    private static void registerMinions(ContentRegistry registry) {
+        registry.registerEffectHandler("island_minion");
+        registry.registerItem(new ItemDefinition("minecraft:armor_stand","minecraft:armor_stand","COMMON","Minion chassis","vanilla_material",TradingClassification.AUCTION_ONLY));
+        for(String raw:List.of("raw_iron","raw_gold"))registry.registerItem(new ItemDefinition("minecraft:"+raw,"minecraft:"+raw,"COMMON","Unsmelted mining resource","vanilla_material",TradingClassification.BAZAAR_COMMODITY));
+        String[][] types={
+            {"cobblestone","cobblestone","cobblestone"},{"coal","coal","coal"},{"iron","raw_iron","iron"},{"gold","raw_gold","gold"},
+            {"diamond","diamond","diamond"},{"redstone","redstone","redstone"},{"lapis","lapis_lazuli","lapis"},{"emerald","emerald","emerald"},
+            {"wheat","wheat","wheat"},{"carrot","carrot","carrot"},{"potato","potato","potato"},{"melon","melon_slice","melon"},{"pumpkin","pumpkin","pumpkin"},
+            {"oak_wood","oak_log","oak_wood"},{"spruce_wood","spruce_log","spruce_wood"},
+            {"zombie","rotten_flesh","rotten_flesh"},{"skeleton","bone","bone"},{"spider","string","string"}
+        };
+        for(String[] type:types) {
+            String id="nexora:minion_"+type[0];
+            registry.registerItem(new ItemDefinition(id,"minecraft:armor_stand","UNCOMMON","Island resource producer, tier I–XI","island_minion",TradingClassification.AUCTION_ONLY,
+                    new ItemProperties(1,16,0,Map.of(),Map.of(),Map.of(type[2],1),null)));
+            registry.registerRecipe(new RecipeDefinition(id,id,1,Map.of("minecraft:"+type[1],8L,"minecraft:armor_stand",1L),type[2],1,null,0));
+        }
+    }
+
     private static void registerRecipeRewards(ContentRegistry registry) {
         for (RecipeDefinition recipe : registry.recipes().values()) {
             ItemDefinition output = registry.items().get(recipe.outputItemId());
-            RewardType type = output.materialKey().endsWith("_sword") || recipe.outputItemId().endsWith("_blade")
+            RewardType type = recipe.outputItemId().startsWith("nexora:minion_") ? RewardType.MINION_RECIPE_UNLOCK : output.materialKey().endsWith("_sword") || recipe.outputItemId().endsWith("_blade")
                     ? RewardType.WEAPON_RECIPE_UNLOCK
                     : output.materialKey().matches("minecraft:.*_(helmet|chestplate|leggings|boots)")
                             ? RewardType.ARMOR_RECIPE_UNLOCK
