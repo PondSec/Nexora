@@ -1,0 +1,10 @@
+name: NexoraProgression
+version: 0.1.0
+main: network.nexora.progression.NexoraProgressionPlugin
+api-version: '1.21'
+depend: [NexoraCore]
+description: Persistent Nexora collection recipe unlocks and advanced material crafting.
+commands:
+  recipebook:
+    description: Open your unlocked Nexora recipe book
+    usage: /recipebook

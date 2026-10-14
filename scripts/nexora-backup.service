@@ -1,0 +1,8 @@
+[Unit]
+Description=Application-consistent backup of Nexora Minecraft server
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/nexora/scripts/backup.sh

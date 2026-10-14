@@ -1,0 +1,15 @@
+.env
+/minecraft/
+/backups/
+**/target/
+**/build/
+*.log
+
+
+# Local metadata and dependencies
+.DS_Store
+._*
+**/node_modules/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

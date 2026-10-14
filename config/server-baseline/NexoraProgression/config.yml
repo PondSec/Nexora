@@ -1,0 +1,11 @@
+hub-spawn:
+  world: nexora_hub
+  x: -2.5
+  y: 64.0
+  z: 0.5
+  yaw: 0.0
+  pitch: 0.0
+infinite-rocket:
+  cooldown-millis: 1500
+  maximum-horizontal-speed: 2.4
+  maximum-vertical-speed: 1.8

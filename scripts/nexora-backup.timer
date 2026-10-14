@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Nexora Minecraft backup
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true
+RandomizedDelaySec=5m
+
+[Install]
+WantedBy=timers.target

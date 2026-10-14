@@ -1,0 +1,7 @@
+name: NexoraFarm
+version: 0.1.0
+main: network.nexora.farm.NexoraFarm
+api-version: '1.21'
+description: Protected shared farm with livestock population balancing and offline crop growth.
+load: POSTWORLD
+depend: [NexoraCore]
